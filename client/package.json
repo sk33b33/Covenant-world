@@ -1,0 +1,9 @@
+{
+  "name": "@covenant-world/client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "dependencies": {
+    "@colyseus/sdk": "^0.18.2"
+  }
+}

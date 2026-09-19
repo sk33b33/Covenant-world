@@ -18,11 +18,22 @@ client/   Test client for walking around a zone and exercising the server
 docs/     Architecture and integration design
 ```
 
+## Running it
+
+```bash
+npm install
+npm run dev --workspace @covenant-world/server
+```
+
+Open http://localhost:2567 in two tabs and walk around with WASD — each tab
+sees the other move.
+
 ## Status
 
-Repo structure only — no server or client code yet. See
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the plan; next step is a
-minimal Colyseus zone server plus a bare-bones test client.
+One zone, server-authoritative movement at 20Hz, verified with 150
+simultaneous clients holding the full tick rate. No interest management, zone
+sharding, battles, or portal integration yet — see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for what comes next.
 
 ## Related repos
 
