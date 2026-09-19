@@ -57,8 +57,17 @@ existing ones are full.
   friend presence, a challenge sent to a player in a different instance.
 - **Battles**: a proximity challenge between two players spawns a separate,
   ephemeral "battle room" — ordinary turn-based TCG logic, no realtime
-  movement concerns — and both players' overworld characters just wait/emote
-  in the zone until it resolves.
+  movement concerns — while both players' overworld characters stay frozen in
+  the zone until it resolves. The battle reports its outcome back over
+  presence rather than by return value, because the zone and the battle are
+  already separate rooms and will eventually be separate processes; the same
+  channel carries cross-zone events once sharding lands.
+
+  The zone freezes a player for the whole battle, so it has to hear an outcome
+  on *every* exit path — a finished match, a forfeit, a battle nobody joined.
+  A battle that ends without publishing would strand both players frozen in
+  the overworld forever, which is why `BattleRoom.onDispose` publishes an
+  `abandoned` result as a backstop.
 
 ## Persistence boundary
 
@@ -103,7 +112,9 @@ simulation, since it's the number the whole sharding plan is built on.
 1. ~~Repo structure + this doc~~
 2. ~~Minimal Colyseus zone server (one zone, no sharding/AOI yet) + a
    bare-bones client that can join and see other connected players move~~
-3. AOI / interest management within a zone.
-4. Multi-instance sharding + matchmaker + Redis registry.
-5. Battle room handoff.
+3. ~~Battle room handoff — proximity challenge, ephemeral battle room,
+   result back to the zone. The battle *itself* is a placeholder coin flip;
+   the TCG ruleset is a separate piece of work.~~
+4. AOI / interest management within a zone.
+5. Multi-instance sharding + matchmaker + Redis registry.
 6. Wire to the portal (see `docs/INTEGRATION.md`).

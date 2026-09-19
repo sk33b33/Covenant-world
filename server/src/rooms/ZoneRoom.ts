@@ -1,6 +1,15 @@
-import { Room, type Client } from "colyseus";
+import { Room, matchMaker, type Client } from "colyseus";
 import { schema, t, type SchemaType } from "@colyseus/schema";
-import { PLAYER_SPEED, TICK_RATE, WORLD, ZONE_CAPACITY } from "../config.js";
+import {
+  CHALLENGE_RADIUS,
+  CHALLENGE_TIMEOUT_MS,
+  PLAYER_SPEED,
+  TICK_RATE,
+  WORLD,
+  ZONE_CAPACITY,
+  battleResultTopic,
+} from "../config.js";
+import type { BattleOptions, BattleResult } from "./BattleRoom.js";
 
 export const Player = schema(
   {
@@ -9,6 +18,8 @@ export const Player = schema(
     name: t.string(),
     dir: t.string().default("down"),
     moving: t.boolean().default(false),
+    /** Frozen in place and un-challengeable while away in a battle room. */
+    inBattle: t.boolean().default(false),
   },
   "Player",
 );
@@ -34,6 +45,9 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
   // because no other client needs to see it.
   private heldInputs = new Map<string, Input>();
 
+  /** Outstanding challenges, keyed by the session that sent them. */
+  private challenges = new Map<string, { target: string; expiresAt: number }>();
+
   onCreate() {
     this.setState(new ZoneState());
 
@@ -41,7 +55,21 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
       this.heldInputs.set(client.sessionId, sanitizeInput(message));
     });
 
+    this.onMessage("challenge", (client, message) => {
+      this.onChallenge(client, String(message?.targetSessionId ?? ""));
+    });
+
+    this.onMessage("challenge:respond", (client, message) => {
+      void this.onChallengeResponse(client, String(message?.from ?? ""), message?.accept === true);
+    });
+
+    this.presence.subscribe(battleResultTopic(this.roomId), this.onBattleResolved);
+
     this.setSimulationInterval((deltaMs) => this.update(deltaMs), 1000 / TICK_RATE);
+  }
+
+  onDispose() {
+    this.presence.unsubscribe(battleResultTopic(this.roomId), this.onBattleResolved);
   }
 
   onJoin(client: Client, options?: { name?: string }) {
@@ -57,12 +85,118 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
   onLeave(client: Client) {
     this.state.players.delete(client.sessionId);
     this.heldInputs.delete(client.sessionId);
+    this.cancelChallengesInvolving(client.sessionId);
+  }
+
+  private onChallenge(client: Client, targetSessionId: string) {
+    const challenger = this.state.players.get(client.sessionId);
+    const target = this.state.players.get(targetSessionId);
+
+    if (!challenger || !target || targetSessionId === client.sessionId) return;
+    if (challenger.inBattle || target.inBattle) return;
+    if (this.challenges.has(client.sessionId)) return;
+    if (distanceBetween(challenger, target) > CHALLENGE_RADIUS) {
+      client.send("challenge:failed", { reason: "too far away" });
+      return;
+    }
+
+    this.challenges.set(client.sessionId, { target: targetSessionId, expiresAt: Date.now() + CHALLENGE_TIMEOUT_MS });
+
+    client.send("challenge:sent", { to: targetSessionId, name: target.name });
+    this.clients
+      .getById(targetSessionId)
+      ?.send("challenge:received", { from: client.sessionId, name: challenger.name });
+  }
+
+  private async onChallengeResponse(client: Client, challengerSessionId: string, accepted: boolean) {
+    const challenge = this.challenges.get(challengerSessionId);
+    if (!challenge || challenge.target !== client.sessionId) return;
+
+    this.challenges.delete(challengerSessionId);
+
+    const challenger = this.state.players.get(challengerSessionId);
+    const target = this.state.players.get(client.sessionId);
+    const challengerClient = this.clients.getById(challengerSessionId);
+
+    if (!accepted) {
+      challengerClient?.send("challenge:declined", { by: target?.name ?? "" });
+      return;
+    }
+
+    // Both could have moved, disconnected, or been pulled into another battle
+    // between the challenge and the answer.
+    if (!challenger || !target || challenger.inBattle || target.inBattle) return;
+    if (distanceBetween(challenger, target) > CHALLENGE_RADIUS) {
+      client.send("challenge:failed", { reason: "too far away" });
+      challengerClient?.send("challenge:failed", { reason: "too far away" });
+      return;
+    }
+
+    challenger.inBattle = true;
+    target.inBattle = true;
+
+    try {
+      const options: BattleOptions = {
+        zoneRoomId: this.roomId,
+        participants: [
+          { zoneSessionId: challengerSessionId, name: challenger.name },
+          { zoneSessionId: client.sessionId, name: target.name },
+        ],
+      };
+      const battle = await matchMaker.createRoom("battle", options);
+
+      for (const participant of options.participants) {
+        const reservation = await matchMaker.reserveSeatFor(battle, { zoneSessionId: participant.zoneSessionId });
+        this.clients.getById(participant.zoneSessionId)?.send("battle:start", { reservation });
+      }
+    } catch (error) {
+      challenger.inBattle = false;
+      target.inBattle = false;
+      const reason = "could not start the battle";
+      client.send("challenge:failed", { reason });
+      challengerClient?.send("challenge:failed", { reason });
+      throw error;
+    }
+  }
+
+  private onBattleResolved = (result: BattleResult) => {
+    for (const zoneSessionId of result.participants) {
+      const player = this.state.players.get(zoneSessionId);
+      if (player) player.inBattle = false;
+
+      this.clients.getById(zoneSessionId)?.send("battle:result", {
+        outcome: result.outcome,
+        won: result.winnerZoneSessionId === zoneSessionId,
+      });
+    }
+  };
+
+  private cancelChallengesInvolving(sessionId: string) {
+    this.challenges.delete(sessionId);
+    for (const [challengerSessionId, challenge] of this.challenges) {
+      if (challenge.target === sessionId) this.challenges.delete(challengerSessionId);
+    }
+  }
+
+  private expireChallenges() {
+    const now = Date.now();
+    for (const [challengerSessionId, challenge] of this.challenges) {
+      if (challenge.expiresAt > now) continue;
+      this.challenges.delete(challengerSessionId);
+      this.clients.getById(challengerSessionId)?.send("challenge:expired", { to: challenge.target });
+    }
   }
 
   private update(deltaMs: number) {
     const delta = deltaMs / 1000;
+    this.expireChallenges();
 
     this.state.players.forEach((player, sessionId) => {
+      if (player.inBattle) {
+        if (player.moving) player.moving = false;
+        return;
+      }
+
       const input = this.heldInputs.get(sessionId) ?? NO_INPUT;
 
       let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
@@ -97,6 +231,10 @@ function randomSpawn() {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function distanceBetween(a: Player, b: Player) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function sanitizeInput(raw: unknown): Input {
