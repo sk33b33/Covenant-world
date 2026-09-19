@@ -19,6 +19,18 @@ Then open http://localhost:2567 in two tabs to see two players share a zone.
 - `scripts/load-test.mjs` — fills a zone with synthetic clients:
   `node scripts/load-test.mjs 150 15` (150 clients, 15 seconds).
 
+## Interest management
+
+A client is only sent the players within `VIEW_RADIUS` (18 tiles) of it. The
+`players` map is `.view()`-tagged, each client gets a `StateView`, and the
+room adds and removes entries as players move — recomputed at 5Hz against a
+grid of view-radius cells, with a little hysteresis so anyone hovering on the
+boundary doesn't flicker in and out.
+
+That means `room.state.players.size` is *what you can see*, not how many are
+in the zone; `room.state.population` is the real count. At 150 players a
+client typically carries ~28 of them.
+
 ## How movement works
 
 Clients never send positions — only which direction they're holding
@@ -53,5 +65,5 @@ is a coin flip (`BattleRoom.pickWinner`). That's the seam where the real TCG
 match goes; everything either side of it — challenge, handoff, freeze,
 result, return — is real.
 
-Not built yet: interest management, zone sharding, the actual card game, any
-connection to the portal. See [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
+Not built yet: zone sharding, the actual card game, any connection to the
+portal. See [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).

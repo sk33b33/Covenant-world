@@ -16,6 +16,10 @@ const randomInput = () => ({
   [DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)]]: true,
 });
 
+// Bots hold a heading for seconds at a time rather than jittering in place, so
+// they spread across the zone the way roaming players would.
+const HEADING_MS = [2000, 4000];
+
 const client = new Client(ENDPOINT);
 const rooms = [];
 const patchCounts = new Map();
@@ -36,7 +40,7 @@ console.log(`room: ${rooms[0].roomId} · walking randomly for ${DURATION}s…`);
 
 for (const room of rooms) {
   room.send("input", randomInput());
-  setInterval(() => room.send("input", randomInput()), 400 + Math.random() * 400);
+  setInterval(() => room.send("input", randomInput()), HEADING_MS[0] + Math.random() * (HEADING_MS[1] - HEADING_MS[0]));
 }
 
 const measureStarted = Date.now();
@@ -49,8 +53,13 @@ const counts = [...patchCounts.values()].sort((a, b) => a - b);
 const connected = rooms.filter((room) => room.connection.isOpen).length;
 const rate = (n) => (n / elapsed).toFixed(1);
 
+const visible = rooms.map((room) => room.state.players.size).sort((a, b) => a - b);
+const average = (values) => (values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1);
+
 console.log(`\nstill connected: ${connected}/${CLIENTS}`);
 console.log(`patches/sec — min ${rate(counts[0])} · median ${rate(counts[counts.length >> 1])} · max ${rate(counts.at(-1))}`);
-console.log(`players in room: ${rooms[0].state.players.size}`);
+console.log(`players in zone: ${rooms[0].state.population}`);
+console.log(`players VISIBLE per client — min ${visible[0]} · avg ${average(visible)} · max ${visible.at(-1)}`);
+console.log(`(each client is sent only what it can see; without interest management every client would carry all ${CLIENTS})`);
 
 process.exit(0);

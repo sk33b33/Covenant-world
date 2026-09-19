@@ -1,10 +1,14 @@
 import { Room, matchMaker, type Client } from "colyseus";
-import { schema, t, type SchemaType } from "@colyseus/schema";
+import { StateView, schema, t, type SchemaType } from "@colyseus/schema";
 import {
   CHALLENGE_RADIUS,
   CHALLENGE_TIMEOUT_MS,
   PLAYER_SPEED,
+  SPAWN_SPREAD,
   TICK_RATE,
+  VIEW_EXIT_RADIUS,
+  VIEW_RADIUS,
+  VISIBILITY_HZ,
   WORLD,
   ZONE_CAPACITY,
   battleResultTopic,
@@ -27,7 +31,11 @@ export type Player = SchemaType<typeof Player>;
 
 export const ZoneState = schema(
   {
-    players: t.map(Player),
+    // View-tagged: a client receives only the players its StateView holds,
+    // which the visibility pass below keeps to those within VIEW_RADIUS.
+    players: t.map(Player).view(),
+    /** Everyone in the zone, not just those visible — the map no longer says. */
+    population: t.number().default(0),
   },
   "ZoneState",
 );
@@ -47,6 +55,11 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
 
   /** Outstanding challenges, keyed by the session that sent them. */
   private challenges = new Map<string, { target: string; expiresAt: number }>();
+
+  /** Who each client can currently see, so a visibility pass only sends the difference. */
+  private visible = new Map<string, Set<string>>();
+
+  private ticksSinceVisibility = 0;
 
   onCreate() {
     this.setState(new ZoneState());
@@ -79,13 +92,22 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     });
 
     this.state.players.set(client.sessionId, player);
+    this.state.population = this.state.players.size;
     this.heldInputs.set(client.sessionId, { ...NO_INPUT });
+
+    // You can always see yourself; everyone else arrives on the next pass.
+    client.view = new StateView();
+    client.view.add(player);
+    this.visible.set(client.sessionId, new Set([client.sessionId]));
   }
 
   onLeave(client: Client) {
     this.state.players.delete(client.sessionId);
+    this.state.population = this.state.players.size;
     this.heldInputs.delete(client.sessionId);
+    this.visible.delete(client.sessionId);
     this.cancelChallengesInvolving(client.sessionId);
+    client.view?.clear();
   }
 
   private onChallenge(client: Client, targetSessionId: string) {
@@ -187,9 +209,70 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     }
   }
 
+  /**
+   * Recomputes who each client can see. Comparing every player against every
+   * other is O(n²) — at 150 players that's 22,500 distance checks per pass —
+   * so players are bucketed into a grid of view-radius-sized cells first and
+   * each client only considers the nine cells around it.
+   */
+  private updateVisibility() {
+    const cells = new Map<string, string[]>();
+
+    this.state.players.forEach((player, sessionId) => {
+      const key = cellKey(player.x, player.y);
+      const bucket = cells.get(key);
+      if (bucket) bucket.push(sessionId);
+      else cells.set(key, [sessionId]);
+    });
+
+    for (const client of this.clients) {
+      const self = this.state.players.get(client.sessionId);
+      const previous = this.visible.get(client.sessionId);
+      if (!self || !previous || !client.view) continue;
+
+      const next = new Set([client.sessionId]);
+      const column = Math.floor(self.x / CELL_SIZE);
+      const row = Math.floor(self.y / CELL_SIZE);
+
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (const otherId of cells.get(`${column + dx}:${row + dy}`) ?? []) {
+            if (otherId === client.sessionId) continue;
+
+            const other = this.state.players.get(otherId);
+            if (!other) continue;
+
+            const limit = previous.has(otherId) ? VIEW_EXIT_RADIUS : VIEW_RADIUS;
+            if (Math.hypot(self.x - other.x, self.y - other.y) <= limit) next.add(otherId);
+          }
+        }
+      }
+
+      for (const sessionId of next) {
+        if (previous.has(sessionId)) continue;
+        const player = this.state.players.get(sessionId);
+        if (player) client.view.add(player);
+      }
+
+      for (const sessionId of previous) {
+        if (next.has(sessionId)) continue;
+        const player = this.state.players.get(sessionId);
+        // A player who left the zone is already gone from every view.
+        if (player) client.view.remove(player);
+      }
+
+      this.visible.set(client.sessionId, next);
+    }
+  }
+
   private update(deltaMs: number) {
     const delta = deltaMs / 1000;
     this.expireChallenges();
+
+    if (++this.ticksSinceVisibility >= TICK_RATE / VISIBILITY_HZ) {
+      this.ticksSinceVisibility = 0;
+      this.updateVisibility();
+    }
 
     this.state.players.forEach((player, sessionId) => {
       if (player.inBattle) {
@@ -221,11 +304,17 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
   }
 }
 
+/** Cell size is the exit radius, so the nine cells around a player always cover it. */
+const CELL_SIZE = VIEW_EXIT_RADIUS;
+
+function cellKey(x: number, y: number) {
+  return `${Math.floor(x / CELL_SIZE)}:${Math.floor(y / CELL_SIZE)}`;
+}
+
 function randomSpawn() {
-  const spread = 4 * 32;
   return {
-    x: clamp(WORLD.width / 2 + (Math.random() - 0.5) * spread, 0, WORLD.width),
-    y: clamp(WORLD.height / 2 + (Math.random() - 0.5) * spread, 0, WORLD.height),
+    x: clamp(WORLD.width / 2 + (Math.random() - 0.5) * SPAWN_SPREAD, 0, WORLD.width),
+    y: clamp(WORLD.height / 2 + (Math.random() - 0.5) * SPAWN_SPREAD, 0, WORLD.height),
   };
 }
 

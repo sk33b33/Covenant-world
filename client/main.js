@@ -196,7 +196,9 @@ function interpolate(delta) {
   }
 
   nearby = closest;
-  populationEl.textContent = `${players.size} / ${config.zoneCapacity} in zone`;
+  // players.size is what this client can see, not the zone's population —
+  // interest management means those are different numbers now.
+  populationEl.textContent = `${players.size} visible · ${room.state.population} / ${config.zoneCapacity} in zone`;
 }
 
 function draw() {

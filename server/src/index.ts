@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { Server, WebSocketTransport } from "colyseus";
-import { CHALLENGE_RADIUS, PORT, TILE_SIZE, WORLD, WORLD_TILES, ZONE_CAPACITY } from "./config.js";
+import { CHALLENGE_RADIUS, PORT, TILE_SIZE, VIEW_RADIUS, WORLD, WORLD_TILES, ZONE_CAPACITY } from "./config.js";
 import { BattleRoom } from "./rooms/BattleRoom.js";
 import { ZoneRoom } from "./rooms/ZoneRoom.js";
 
@@ -21,6 +21,7 @@ app.get("/config.json", (_req, res) => {
     worldTiles: WORLD_TILES,
     zoneCapacity: ZONE_CAPACITY,
     challengeRadius: CHALLENGE_RADIUS,
+    viewRadius: VIEW_RADIUS,
   });
 });
 

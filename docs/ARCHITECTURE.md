@@ -48,9 +48,27 @@ existing ones are full.
   ~15–20Hz tick. Client-side prediction + reconciliation keeps movement
   feeling instant despite the round trip.
 - **Interest management (AOI)**: within a zone, a player's client only
-  receives state for entities within a radius of their position (spatial
-  grid), not the whole zone's 100–150 players. This is what keeps per-tick
-  bandwidth flat as a zone fills up — sharding alone isn't enough.
+  receives state for players within `VIEW_RADIUS` of it, not the whole zone's
+  100–150. This is what keeps per-client bandwidth flat as a zone fills up —
+  sharding alone isn't enough.
+
+  Built on Colyseus `StateView`: the `players` map is `.view()`-tagged, so
+  nothing in it reaches a client until that client's view holds it, and the
+  room adds/removes entries as players move. Three things make it cheap:
+
+  - **A spatial grid.** Comparing every player to every other is O(n²) —
+    22,500 distance checks per pass at 150 players. Players are bucketed into
+    cells the size of the view radius, and each client only examines the nine
+    cells around it.
+  - **Hysteresis.** Players leave the view slightly further out than they
+    enter it. Without the gap, someone loitering on the boundary would be
+    added and removed repeatedly, and every re-add re-sends the whole entity.
+  - **5Hz, not 20Hz.** At walking pace a player crosses a small fraction of
+    the view radius between passes, so recomputing every fourth tick costs a
+    quarter of the work with no perceptible pop-in.
+
+  The zone's real population no longer equals what a client can see, so
+  `ZoneState.population` carries it as an untagged field.
 - **Cross-zone coordination**: Redis holds the live room registry (zone name
   → instance → current player count) so the matchmaker can route new
   entrants, and pub/sub carries anything that isn't zone-local — chat,
@@ -97,15 +115,21 @@ decided yet for this prototype; running locally is enough for now.
 walking clients. At the 150-player cap, on one local dev process:
 
 ```
-all 150 joined in 638ms (4.3ms/client)
+all 150 joined in 956ms (6.4ms/client)
 still connected: 150/150
 patches/sec — min 19.9 · median 19.9 · max 20.0
+players in zone: 150
+players VISIBLE per client — min 2 · avg 27.7 · max 46
 ```
 
-Every client held the full 20Hz tick rate with no drops, and that's *before*
-interest management — so the 100–150 figure is a conservative starting point,
-not a ceiling we're pressed against. Re-run this after any change to the
-simulation, since it's the number the whole sharding plan is built on.
+Every client held the full 20Hz tick rate with no drops while carrying an
+average of 27.7 players instead of all 150 — interest management cuts what
+each client is sent by roughly 80%, and that ratio improves as the zone
+fills, because the view radius doesn't grow with the population.
+
+So the 100–150 figure is a conservative starting point, not a ceiling we're
+pressed against. Re-run this after any change to the simulation, since it's
+the number the whole sharding plan is built on.
 
 ## Build order
 
@@ -115,6 +139,6 @@ simulation, since it's the number the whole sharding plan is built on.
 3. ~~Battle room handoff — proximity challenge, ephemeral battle room,
    result back to the zone. The battle *itself* is a placeholder coin flip;
    the TCG ruleset is a separate piece of work.~~
-4. AOI / interest management within a zone.
+4. ~~AOI / interest management within a zone.~~
 5. Multi-instance sharding + matchmaker + Redis registry.
 6. Wire to the portal (see `docs/INTEGRATION.md`).

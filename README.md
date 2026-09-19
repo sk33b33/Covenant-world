@@ -30,12 +30,14 @@ to the other player and press <kbd>E</kbd> to challenge them into a battle.
 
 ## Status
 
-One zone with server-authoritative movement at 20Hz, verified with 150
-simultaneous clients holding the full tick rate, plus the full challenge →
-battle → back-to-the-overworld handoff. The battle itself is a placeholder
-coin flip — the TCG ruleset is separate work.
+One zone with server-authoritative movement at 20Hz, interest management so
+each client is only sent the players near it, and the full challenge →
+battle → back-to-the-overworld handoff. Verified with 150 simultaneous
+clients holding the full tick rate while carrying ~28 players each instead
+of all 150.
 
-No interest management, zone sharding, or portal integration yet — see
+The battle itself is a placeholder coin flip — the TCG ruleset is separate
+work. No zone sharding or portal integration yet; see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for what comes next.
 
 ## Related repos
