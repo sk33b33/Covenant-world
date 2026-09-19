@@ -10,6 +10,13 @@ wired to the existing portal for real accounts, save data, and match
 recording. See [`docs/INTEGRATION.md`](docs/INTEGRATION.md) for exactly what
 that wiring will look like and why it's deferred.
 
+## Deploying
+
+The zone server holds the live world in memory and keeps a WebSocket open per
+player, so it needs a container host — not a serverless one. `Dockerfile` and
+`fly.toml` are set up for Fly.io; see [`docs/DEPLOY.md`](docs/DEPLOY.md),
+which also explains why Vercel can't run it.
+
 ## Repo layout
 
 ```

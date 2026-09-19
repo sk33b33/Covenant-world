@@ -55,7 +55,9 @@ const gameServer = new Server({
 gameServer.define("zone", ZoneRoom).filterBy(["zoneId"]);
 gameServer.define("battle", BattleRoom);
 
-await gameServer.listen(PORT);
+// Containers must bind every interface, not just loopback, or the host's
+// proxy can't reach the process.
+await gameServer.listen(PORT, process.env.HOST ?? "0.0.0.0");
 console.log(
   `Covenant World zone server — http://localhost:${PORT}` +
     ` · zones: ${Object.keys(ZONES).join(", ")} · capacity ${ZONE_CAPACITY}/instance` +
