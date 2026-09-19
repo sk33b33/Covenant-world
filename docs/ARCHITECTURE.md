@@ -48,10 +48,20 @@ takes whichever instance has space.
 - **Transport**: [Colyseus](https://colyseus.io) (Node, WebSocket). Rooms map
   1:1 to zone instances; Colyseus gives schema-based state diffing for free,
   so we're not hand-rolling delta compression.
-- **Authority**: server-authoritative movement. Client sends inputs
-  (direction/intent), server simulates and is the source of truth, at a
-  ~15–20Hz tick. Client-side prediction + reconciliation keeps movement
-  feeling instant despite the round trip.
+- **Authority**: server-authoritative, tile-locked movement. A player occupies
+  a tile and steps to the next over a fixed duration, four directions only —
+  the Pokemon model. The client sends intent (which direction is held), the
+  server decides where that puts you at a 20Hz tick.
+
+  Tiles rather than pixels means a walking player emits one update per *step*
+  rather than one per tick, and the client slides between tiles at a matching
+  pace. It also makes collision exact: a tile is walkable or it isn't, with no
+  partial overlaps to resolve.
+
+- **Terrain**: generated deterministically per zone from its id, so every
+  process agrees on what's solid without distributing map data. Server and
+  client read the same table — the server to allow or refuse a step, the
+  client to draw it.
 - **Interest management (AOI)**: within a zone, a player's client only
   receives state for players within `VIEW_RADIUS` of it, not the whole zone's
   100–150. This is what keeps per-client bandwidth flat as a zone fills up —

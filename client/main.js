@@ -14,7 +14,17 @@ const KEY_BINDINGS = {
 };
 
 const held = { up: false, down: false, left: false, right: false };
+const pressedAt = {};
+const releasedAt = {};
 let lastSent = null;
+
+/**
+ * A key is reported as held for at least this long. The server samples held
+ * direction on its own 20Hz tick, so a tap shorter than one tick would land
+ * and clear between samples and be lost entirely — and tapping to turn on the
+ * spot is exactly what the turn delay exists for.
+ */
+const MIN_HOLD_MS = 90;
 
 // Server positions jump one tick at a time (20Hz); these catch up to them every
 // animation frame so movement reads as smooth at whatever the display refreshes.
@@ -37,6 +47,7 @@ const colyseus = new Colyseus.Client(endpoint);
 let room;
 let battleRoom = null;
 let traveling = false;
+let terrain = null;
 
 /**
  * Joins a zone, or moves to another one. The matchmaker picks which *instance*
@@ -59,6 +70,8 @@ async function connectToZone(zoneId, entry) {
   rendered.clear();
   nearby = null;
   backToRoaming("");
+
+  terrain = await fetch(`/zones/${zoneId ?? config.startingZone}/terrain.json`).then((res) => res.json());
 
   try {
     room = await colyseus.joinOrCreate("zone", { name, zoneId, entry });
@@ -118,7 +131,12 @@ function onKey(event) {
     event.preventDefault();
     // Movement keys are dead outside the overworld — the server freezes you
     // during a battle anyway, so releasing them here keeps the two in step.
-    held[direction] = mode === "roaming" && event.type === "keydown";
+    if (event.type === "keydown") {
+      if (!held[direction]) pressedAt[direction] = performance.now();
+      held[direction] = mode === "roaming";
+    } else {
+      releasedAt[direction] = performance.now();
+    }
     return;
   }
 
@@ -169,6 +187,14 @@ function showNotice(message) {
 }
 
 function sendInputIfChanged() {
+  const now = performance.now();
+  for (const direction of Object.keys(held)) {
+    const releasedAfterPress = (releasedAt[direction] ?? -1) >= (pressedAt[direction] ?? 0);
+    if (held[direction] && releasedAfterPress && now - (pressedAt[direction] ?? 0) >= MIN_HOLD_MS) {
+      held[direction] = false;
+    }
+  }
+
   const serialized = JSON.stringify(held);
   if (serialized === lastSent) return;
   lastSent = serialized;
@@ -194,38 +220,56 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+// Walking speed in pixels/second, derived from how long the server takes to
+// cross one tile — so the slide finishes exactly as the step does.
+const WALK_SPEED = config.tileSize / (config.stepDurationMs / 1000);
+const tileToPixel = (tile) => (tile + 0.5) * config.tileSize;
+
 function interpolate(delta) {
   // The first state patch lands shortly after join, so the first few frames
   // render an empty world rather than a crash.
   const players = room.state?.players;
   if (!players) return;
 
-  // Exponential smoothing: covers ~90% of the remaining gap every 100ms,
-  // independent of frame rate.
-  const catchUp = 1 - Math.pow(0.0001, delta);
   const present = new Set();
   const self = players.get(room.sessionId);
   let closest = null;
 
   players.forEach((player, sessionId) => {
     present.add(sessionId);
+    const targetX = tileToPixel(player.tx);
+    const targetY = tileToPixel(player.ty);
     let entry = rendered.get(sessionId);
 
     if (!entry) {
-      entry = { x: player.x, y: player.y };
+      entry = { x: targetX, y: targetY };
       rendered.set(sessionId, entry);
     }
 
-    entry.x += (player.x - entry.x) * catchUp;
-    entry.y += (player.y - entry.y) * catchUp;
+    // Slide at a constant walking pace toward the tile the server says they're
+    // on. A jump of more than a couple of tiles isn't walking — it's a spawn or
+    // a zone change — so take it instantly rather than gliding across the map.
+    const gapX = targetX - entry.x;
+    const gapY = targetY - entry.y;
+    const reach = WALK_SPEED * delta;
+
+    if (Math.hypot(gapX, gapY) > config.tileSize * 2) {
+      entry.x = targetX;
+      entry.y = targetY;
+    } else {
+      entry.x = Math.abs(gapX) <= reach ? targetX : entry.x + Math.sign(gapX) * reach;
+      entry.y = Math.abs(gapY) <= reach ? targetY : entry.y + Math.sign(gapY) * reach;
+    }
+
     entry.name = player.name;
     entry.dir = player.dir;
     entry.moving = player.moving;
     entry.inBattle = player.inBattle;
 
     if (self && !self.inBattle && !player.inBattle && sessionId !== room.sessionId) {
-      const distance = Math.hypot(self.x - player.x, self.y - player.y);
-      if (distance <= config.challengeRadius && (!closest || distance < closest.distance)) {
+      // Adjacency, diagonals included — the eight tiles around you.
+      const distance = Math.max(Math.abs(self.tx - player.tx), Math.abs(self.ty - player.ty));
+      if (distance <= config.challengeRadiusTiles && (!closest || distance < closest.distance)) {
         closest = { sessionId, name: player.name, distance };
       }
     }
@@ -244,83 +288,272 @@ function interpolate(delta) {
 
 function draw() {
   const self = rendered.get(room.sessionId);
-  // Instances of different zones are different sizes, so bounds come from state.
-  const zone = { width: room.state?.width || canvas.width, height: room.state?.height || canvas.height };
+  // Instances of different zones are different sizes, so bounds come from
+  // state — in tiles, which only the client turns into pixels.
+  const zone = {
+    width: (room.state?.width || 0) * config.tileSize || canvas.width,
+    height: (room.state?.height || 0) * config.tileSize || canvas.height,
+  };
   const camera = {
     x: clamp((self?.x ?? zone.width / 2) - canvas.width / 2, 0, Math.max(0, zone.width - canvas.width)),
     y: clamp((self?.y ?? zone.height / 2) - canvas.height / 2, 0, Math.max(0, zone.height - canvas.height)),
   };
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawGround(camera, zone);
+  drawTerrain(camera, zone);
 
-  for (const [sessionId, entry] of rendered) {
-    drawPlayer(entry, sessionId, camera);
-  }
+  // Trees, rocks and players are drawn together in depth order, so you pass
+  // behind a tree rather than through it.
+  const standing = [];
+  for (const [sessionId, entry] of rendered) standing.push({ y: entry.y, draw: () => drawCharacter(entry, sessionId, camera) });
+  collectTallTerrain(camera, standing);
+  standing.sort((a, b) => a.y - b.y);
+  for (const item of standing) item.draw();
 }
 
-function drawGround(camera, zone) {
-  ctx.fillStyle = "#26301f";
+// Shades within a kind sit close together on purpose: enough variation that a
+// field isn't a flat slab, not so much that it reads as a checkerboard.
+const GROUND = {
+  grass: ["#4c7b42", "#4e7d44", "#4a783f", "#507f46"],
+  flowers: ["#4c7b42"],
+  path: ["#b09566", "#ad9263", "#b3996a"],
+  sand: ["#d6c69a", "#d3c396"],
+  water: ["#2f6fa8", "#30719f"],
+  tree: ["#46743c"],
+  rock: ["#4c7b42"],
+};
+
+/** Stable per-tile variation, so the same tile always looks the same. */
+function tileNoise(tx, ty) {
+  const value = Math.sin(tx * 127.1 + ty * 311.7) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function tileAt(tx, ty) {
+  if (!terrain) return "grass";
+  const char = terrain.rows[ty]?.[tx];
+  if (!char) return "grass";
+  for (const [kind, spec] of Object.entries(config.terrain)) if (spec.char === char) return kind;
+  return "grass";
+}
+
+function visibleTiles(camera) {
+  const size = config.tileSize;
+  return {
+    fromX: Math.max(0, Math.floor(camera.x / size)),
+    toX: Math.min((terrain?.width ?? 0) - 1, Math.ceil((camera.x + canvas.width) / size)),
+    fromY: Math.max(0, Math.floor(camera.y / size)),
+    toY: Math.min((terrain?.height ?? 0) - 1, Math.ceil((camera.y + canvas.height) / size)),
+  };
+}
+
+function drawTerrain(camera, zone) {
+  const size = config.tileSize;
+  ctx.fillStyle = "#1d2a18";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
+  const { fromX, toX, fromY, toY } = visibleTiles(camera);
+  const shimmer = performance.now() / 700;
 
-  for (let x = -camera.x % config.tileSize; x < canvas.width; x += config.tileSize) {
-    ctx.moveTo(x + 0.5, 0);
-    ctx.lineTo(x + 0.5, canvas.height);
-  }
-  for (let y = -camera.y % config.tileSize; y < canvas.height; y += config.tileSize) {
-    ctx.moveTo(0, y + 0.5);
-    ctx.lineTo(canvas.width, y + 0.5);
-  }
-  ctx.stroke();
+  for (let ty = fromY; ty <= toY; ty++) {
+    for (let tx = fromX; tx <= toX; tx++) {
+      const kind = tileAt(tx, ty);
+      const noise = tileNoise(tx, ty);
+      const x = Math.round(tx * size - camera.x);
+      const y = Math.round(ty * size - camera.y);
+      const palette = GROUND[kind] ?? GROUND.grass;
 
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
-  ctx.strokeRect(-camera.x + 0.5, -camera.y + 0.5, zone.width, zone.height);
+      ctx.fillStyle = palette[Math.floor(noise * palette.length)];
+      ctx.fillRect(x, y, size, size);
+
+      if (kind === "water") {
+        // A couple of drifting highlights, enough to read as moving water.
+        ctx.fillStyle = "rgba(255,255,255,0.13)";
+        const wave = Math.sin(shimmer + tx * 0.7 + ty * 0.4) * 3;
+        ctx.fillRect(x + 4, y + 10 + wave, size - 12, 2);
+        ctx.fillStyle = "rgba(255,255,255,0.07)";
+        ctx.fillRect(x + 9, y + 21 - wave, size - 18, 2);
+      } else if (kind === "grass" && noise > 0.86) {
+        ctx.fillStyle = "rgba(255,255,255,0.05)";
+        ctx.fillRect(x + 6, y + 18, 5, 3);
+        ctx.fillRect(x + 18, y + 9, 5, 3);
+      } else if (kind === "flowers") {
+        const colours = ["#e8d26a", "#e07a9a", "#dcdcea"];
+        ctx.fillStyle = colours[Math.floor(noise * colours.length)];
+        ctx.fillRect(x + 8 + noise * 6, y + 10 + noise * 8, 4, 4);
+        ctx.fillRect(x + 19, y + 20, 3, 3);
+      } else if (kind === "path" && noise > 0.8) {
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.fillRect(x + 7, y + 13, 6, 4);
+      }
+    }
+  }
+
+  ctx.strokeStyle = "rgba(0,0,0,0.35)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-camera.x, -camera.y, zone.width, zone.height);
 }
 
-function drawPlayer(entry, sessionId, camera) {
+/** Trees and rocks stand up out of their tile, so they sort with the players. */
+function collectTallTerrain(camera, into) {
+  const size = config.tileSize;
+  const { fromX, toX, fromY, toY } = visibleTiles(camera);
+
+  for (let ty = fromY; ty <= toY; ty++) {
+    for (let tx = fromX; tx <= toX; tx++) {
+      const kind = tileAt(tx, ty);
+      if (kind !== "tree" && kind !== "rock") continue;
+      const x = tx * size - camera.x;
+      const y = ty * size - camera.y;
+      into.push({
+        y: ty * size + size,
+        draw: () => (kind === "tree" ? drawTree(x, y, tileNoise(tx, ty)) : drawRock(x, y)),
+      });
+    }
+  }
+}
+
+function drawTree(x, y, noise) {
+  const size = config.tileSize;
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.beginPath();
+  ctx.ellipse(x + size / 2, y + size - 4, size * 0.34, size * 0.14, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#6b4a2f";
+  ctx.fillRect(x + size / 2 - 3, y + size - 14, 6, 12);
+
+  const canopy = ["#2f5c2a", "#356630", "#2b5526"][Math.floor(noise * 3)];
+  ctx.fillStyle = canopy;
+  ctx.beginPath();
+  ctx.arc(x + size / 2, y + size / 2 - 8, size * 0.46, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.08)";
+  ctx.beginPath();
+  ctx.arc(x + size / 2 - 5, y + size / 2 - 13, size * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawRock(x, y) {
+  const size = config.tileSize;
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.beginPath();
+  ctx.ellipse(x + size / 2, y + size - 6, size * 0.3, size * 0.12, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#7d8285";
+  ctx.beginPath();
+  ctx.moveTo(x + 5, y + size - 6);
+  ctx.lineTo(x + 11, y + 10);
+  ctx.lineTo(x + 22, y + 8);
+  ctx.lineTo(x + size - 4, y + size - 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.14)";
+  ctx.beginPath();
+  ctx.moveTo(x + 11, y + 10);
+  ctx.lineTo(x + 22, y + 8);
+  ctx.lineTo(x + 18, y + 17);
+  ctx.closePath();
+  ctx.fill();
+}
+
+const SHIRTS = ["#c0553f", "#3f74c0", "#4aa05e", "#9a5bb5", "#c9873f", "#3fa2a8"];
+
+function shirtColour(name) {
+  let hash = 0;
+  for (let i = 0; i < (name ?? "").length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return SHIRTS[hash % SHIRTS.length];
+}
+
+function drawCharacter(entry, sessionId, camera) {
   const isSelf = sessionId === room.sessionId;
-  const x = entry.x - camera.x;
-  const y = entry.y - camera.y;
-  const radius = config.tileSize / 2;
+  const size = config.tileSize;
+  const x = Math.round(entry.x - camera.x);
+  const feet = Math.round(entry.y - camera.y) + size / 2 - 4;
+
+  // Walk cycle: legs alternate and the body bobs, driven by distance covered
+  // rather than time, so it stays in step with the tile the server puts us on.
+  entry.phase = (entry.phase ?? 0) + (entry.moving ? 0.22 : 0);
+  if (!entry.moving) entry.phase = 0;
+  const swing = Math.sin(entry.phase) * 3;
+  const bob = entry.moving ? Math.abs(Math.sin(entry.phase)) * 1.5 : 0;
+
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.beginPath();
+  ctx.ellipse(x, feet + 2, 9, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
 
   if (nearby?.sessionId === sessionId) {
-    ctx.strokeStyle = "#7ddc7d";
+    ctx.strokeStyle = "#8ee88e";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(x, y, radius + 5, 0, Math.PI * 2);
+    ctx.ellipse(x, feet + 2, 13, 6, 0, 0, Math.PI * 2);
     ctx.stroke();
   }
 
-  ctx.fillStyle = isSelf ? "#f2c14e" : "#6fa8dc";
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  const top = feet - 26 - bob;
+
+  ctx.fillStyle = "#2f3a4a";
+  ctx.fillRect(x - 5, feet - 9 + swing * 0.3, 4, 9 - swing * 0.3);
+  ctx.fillRect(x + 1, feet - 9 - swing * 0.3, 4, 9 + swing * 0.3);
+
+  ctx.fillStyle = shirtColour(entry.name);
+  roundedRect(x - 7, top + 10, 14, 13, 3);
   ctx.fill();
+
+  // Arms read as depth cues when facing sideways.
+  ctx.fillStyle = "#e8b48c";
+  if (entry.dir === "left") ctx.fillRect(x - 9, top + 12 + swing, 3, 8);
+  else if (entry.dir === "right") ctx.fillRect(x + 6, top + 12 - swing, 3, 8);
+  else {
+    ctx.fillRect(x - 9, top + 12 + swing, 3, 8);
+    ctx.fillRect(x + 6, top + 12 - swing, 3, 8);
+  }
+
+  ctx.fillStyle = "#e8b48c";
+  ctx.beginPath();
+  ctx.arc(x, top + 4, 7.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Hair covers the whole head from behind and leaves a face otherwise.
+  ctx.fillStyle = isSelf ? "#4a3520" : "#2f2a26";
+  ctx.beginPath();
+  if (entry.dir === "up") ctx.arc(x, top + 4, 7.5, 0, Math.PI * 2);
+  else ctx.arc(x, top + 2.5, 7.5, Math.PI, Math.PI * 2);
+  ctx.fill();
+
+  if (entry.dir !== "up") {
+    ctx.fillStyle = "#2b2b33";
+    const eyes = entry.dir === "left" ? [-4] : entry.dir === "right" ? [3] : [-3, 2];
+    for (const offset of eyes) ctx.fillRect(x + offset, top + 5, 2, 2);
+  }
 
   if (entry.inBattle) {
     ctx.strokeStyle = "#e06c75";
-    ctx.lineWidth = 3;
-    ctx.stroke();
-  } else if (isSelf) {
-    ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(x, feet + 2, 13, 6, 0, 0, Math.PI * 2);
     ctx.stroke();
   }
 
-  // A stub for sprite facing — until there are sprites, the nose is the tell.
-  const facing = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[entry.dir] ?? [0, 1];
-  ctx.fillStyle = "#11151c";
-  ctx.beginPath();
-  ctx.arc(x + facing[0] * radius * 0.55, y + facing[1] * radius * 0.55, radius * 0.22, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = "#e6e9ef";
-  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+  ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText(entry.name ?? "", x, y - radius - 6);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(0,0,0,0.65)";
+  ctx.strokeText(entry.name ?? "", x, top - 8);
+  ctx.fillStyle = isSelf ? "#ffe08a" : "#ffffff";
+  ctx.fillText(entry.name ?? "", x, top - 8);
+}
+
+function roundedRect(x, y, width, height, radius) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + width, y, x + width, y + height, radius);
+  ctx.arcTo(x + width, y + height, x, y + height, radius);
+  ctx.arcTo(x, y + height, x, y, radius);
+  ctx.arcTo(x, y, x + width, y, radius);
+  ctx.closePath();
 }
 
 function drawOverlays(now) {

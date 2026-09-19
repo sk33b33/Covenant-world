@@ -3,8 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { RedisDriver, RedisPresence, Server, WebSocketTransport } from "colyseus";
-import { CHALLENGE_RADIUS, PORT, TILE_SIZE, VIEW_RADIUS, ZONE_CAPACITY } from "./config.js";
-import { STARTING_ZONE, ZONES } from "./zones.js";
+import { CHALLENGE_RADIUS_TILES, PORT, STEP_DURATION_MS, TILE_SIZE, VIEW_RADIUS_TILES, ZONE_CAPACITY } from "./config.js";
+import { STARTING_ZONE, ZONES, getZone } from "./zones.js";
+import { TERRAIN, buildTileMap } from "./terrain.js";
 import { BattleRoom } from "./rooms/BattleRoom.js";
 import { ZoneRoom } from "./rooms/ZoneRoom.js";
 
@@ -19,11 +20,20 @@ app.get("/config.json", (_req, res) => {
   res.json({
     tileSize: TILE_SIZE,
     zoneCapacity: ZONE_CAPACITY,
-    challengeRadius: CHALLENGE_RADIUS,
-    viewRadius: VIEW_RADIUS,
+    challengeRadiusTiles: CHALLENGE_RADIUS_TILES,
+    viewRadiusTiles: VIEW_RADIUS_TILES,
+    stepDurationMs: STEP_DURATION_MS,
     startingZone: STARTING_ZONE,
     zones: Object.values(ZONES).map(({ id, name }) => ({ id, name })),
+    terrain: TERRAIN,
   });
+});
+
+// Terrain is deterministic per zone and never changes, so it's a plain cached
+// fetch rather than part of the realtime state every client re-receives.
+app.get("/zones/:zoneId/terrain.json", (req, res) => {
+  const zone = getZone(req.params.zoneId);
+  res.set("cache-control", "public, max-age=300").json(buildTileMap(zone));
 });
 
 const httpServer = createServer(app);

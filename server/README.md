@@ -64,11 +64,41 @@ client typically carries ~28 of them.
 
 ## How movement works
 
-Clients never send positions — only which direction they're holding
-(`input` message). The room stores that intent off-state, integrates it each
-tick against the walk speed, and clamps to the world bounds. Positions are
-therefore always the server's, which is what makes speed-hacking a
+Movement is **tile-locked**, like the Pokemon games: a player occupies a tile
+and steps to the next one over `STEP_DURATION_MS`, four directions only, no
+diagonals. Pressing a direction you aren't facing turns you without moving,
+so a tap turns on the spot and a hold walks — `TURN_DELAY_MS` is the window
+that separates the two.
+
+Clients never send positions, only which direction they're holding (`input`).
+The room keeps that intent off-state and decides where it puts you, so
+positions are always the server's — which is what makes speed-hacking a
 non-issue later.
+
+Because positions are tiles rather than pixels, a walking player produces one
+state update per *step* instead of one per tick, and the client slides between
+tiles at a matching pace so it still looks continuous.
+
+One client-side subtlety: a held key is reported as held for at least 90ms.
+The server samples input on its own 20Hz tick, so a tap shorter than one tick
+would otherwise land and clear between two samples and be lost — and tapping
+to turn is exactly what the turn delay exists for.
+
+## Terrain and collision
+
+`src/terrain.ts` generates each zone's tiles deterministically from its id, so
+every process in a fleet agrees on what's solid without shipping map data
+around. The server reads it to decide whether a step is allowed; the client
+fetches the same map from `/zones/:zoneId/terrain.json` to draw it. One table
+drives both, so a tile that looks solid always is.
+
+It's generated rather than hand-authored because a real game needs a map
+editor and this needed something with the right *shape* — open ground, water
+and woodland to route around, paths that reach the exits — to build collision
+and rendering against.
+
+Walking off the map edge and walking into a tree are deliberately different:
+the first is travel to the neighbouring zone, the second is just a wall.
 
 ## Challenges and battles
 

@@ -1,26 +1,31 @@
 import { Room, matchMaker, type Client } from "colyseus";
 import { StateView, schema, t, type SchemaType } from "@colyseus/schema";
 import {
-  CHALLENGE_RADIUS,
+  CHALLENGE_RADIUS_TILES,
   CHALLENGE_TIMEOUT_MS,
-  EDGE_THRESHOLD,
-  PLAYER_SPEED,
-  SPAWN_SPREAD,
+  SPAWN_SPREAD_TILES,
+  STEP_DURATION_MS,
   TICK_RATE,
-  TILE_SIZE,
-  VIEW_EXIT_RADIUS,
-  VIEW_RADIUS,
+  TURN_DELAY_MS,
+  VIEW_EXIT_RADIUS_TILES,
+  VIEW_RADIUS_TILES,
   VISIBILITY_HZ,
   ZONE_CAPACITY,
   battleResultTopic,
 } from "../config.js";
-import { OPPOSITE_EDGE, getZone, isValidEntry, zoneSize, type Edge, type ZoneDefinition } from "../zones.js";
+import { OPPOSITE_EDGE, getZone, isValidEntry, type Edge, type ZoneDefinition } from "../zones.js";
+import { buildTileMap, isWalkableTile, type TileMap } from "../terrain.js";
 import type { BattleOptions, BattleResult } from "./BattleRoom.js";
 
 export const Player = schema(
   {
-    x: t.number(),
-    y: t.number(),
+    /**
+     * The tile this player occupies — or, mid-step, the one being stepped
+     * onto. Tiles rather than pixels means a walking player produces one
+     * update per step instead of one per tick.
+     */
+    tx: t.uint16(),
+    ty: t.uint16(),
     name: t.string(),
     dir: t.string().default("down"),
     moving: t.boolean().default(false),
@@ -40,9 +45,9 @@ export const ZoneState = schema(
     population: t.number().default(0),
     zoneId: t.string().default(""),
     zoneName: t.string().default(""),
-    /** Zone dimensions travel with the state, since instances differ in size. */
-    width: t.number().default(0),
-    height: t.number().default(0),
+    /** Zone size in tiles. Travels with the state since instances differ. */
+    width: t.uint16().default(0),
+    height: t.uint16().default(0),
   },
   "ZoneState",
 );
@@ -51,6 +56,20 @@ export type ZoneState = SchemaType<typeof ZoneState>;
 type Input = { up: boolean; down: boolean; left: boolean; right: boolean };
 
 const NO_INPUT: Input = { up: false, down: false, left: false, right: false };
+
+type Direction = "up" | "down" | "left" | "right";
+
+const STEPS: Record<Direction, { dx: number; dy: number; edge: Edge }> = {
+  up: { dx: 0, dy: -1, edge: "north" },
+  down: { dx: 0, dy: 1, edge: "south" },
+  left: { dx: -1, dy: 0, edge: "west" },
+  right: { dx: 1, dy: 0, edge: "east" },
+};
+
+const DIRECTIONS = Object.keys(STEPS) as Direction[];
+
+/** When a step or turn may next begin. Not synchronized — only its results are. */
+type Motion = { stepEndsAt: number; turnReadyAt: number };
 
 export class ZoneRoom extends Room<{ state: ZoneState }> {
   maxClients = ZONE_CAPACITY;
@@ -70,14 +89,17 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
 
   /** Which zone this instance is one of. Several instances of it may be running. */
   private zone: ZoneDefinition = getZone(undefined);
-  private size = zoneSize(this.zone);
+  private terrain: TileMap = buildTileMap(this.zone);
+
+  /** Step and turn timing per player. */
+  private motion = new Map<string, Motion>();
 
   /** Players already told to travel, so the crossing only fires once. */
   private departing = new Set<string>();
 
   onCreate(options?: { zoneId?: string }) {
     this.zone = getZone(options?.zoneId);
-    this.size = zoneSize(this.zone);
+    this.terrain = buildTileMap(this.zone);
 
     // The matchmaker filters on this, so a player asking for "meadow" is only
     // ever offered a meadow instance.
@@ -86,8 +108,8 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     this.setState(new ZoneState());
     this.state.zoneId = this.zone.id;
     this.state.zoneName = this.zone.name;
-    this.state.width = this.size.width;
-    this.state.height = this.size.height;
+    this.state.width = this.zone.tiles.width;
+    this.state.height = this.zone.tiles.height;
 
     this.onMessage("input", (client, message) => {
       this.heldInputs.set(client.sessionId, sanitizeInput(message));
@@ -103,7 +125,7 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
 
     this.presence.subscribe(battleResultTopic(this.roomId), this.onBattleResolved);
 
-    this.setSimulationInterval((deltaMs) => this.update(deltaMs), 1000 / TICK_RATE);
+    this.setSimulationInterval(() => this.update(), 1000 / TICK_RATE);
   }
 
   onDispose() {
@@ -119,6 +141,7 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     this.state.players.set(client.sessionId, player);
     this.state.population = this.state.players.size;
     this.heldInputs.set(client.sessionId, { ...NO_INPUT });
+    this.motion.set(client.sessionId, { stepEndsAt: 0, turnReadyAt: 0 });
 
     // You can always see yourself; everyone else arrives on the next pass.
     client.view = new StateView();
@@ -130,6 +153,7 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     this.state.players.delete(client.sessionId);
     this.state.population = this.state.players.size;
     this.heldInputs.delete(client.sessionId);
+    this.motion.delete(client.sessionId);
     this.visible.delete(client.sessionId);
     this.departing.delete(client.sessionId);
     this.cancelChallengesInvolving(client.sessionId);
@@ -141,42 +165,101 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
    * in through; arriving fresh puts you near the middle.
    */
   private spawnPoint(entry?: string) {
-    const jitter = (Math.random() - 0.5) * SPAWN_SPREAD;
-    const inset = 2 * TILE_SIZE;
+    const { width, height } = this.zone.tiles;
+    const jitter = () => Math.round((Math.random() - 0.5) * SPAWN_SPREAD_TILES);
+    const middleX = clamp(Math.floor(width / 2) + jitter(), 0, width - 1);
+    const middleY = clamp(Math.floor(height / 2) + jitter(), 0, height - 1);
+    const inset = 1;
 
-    if (!isValidEntry(this.zone, entry)) {
-      return {
-        x: clamp(this.size.width / 2 + jitter, 0, this.size.width),
-        y: clamp(this.size.height / 2 + jitter, 0, this.size.height),
-      };
+    const candidate = (() => {
+      switch (isValidEntry(this.zone, entry) ? entry : undefined) {
+        case "west": return { tx: inset, ty: middleY };
+        case "east": return { tx: width - 1 - inset, ty: middleY };
+        case "north": return { tx: middleX, ty: inset };
+        case "south": return { tx: middleX, ty: height - 1 - inset };
+        default: return { tx: middleX, ty: middleY };
+      }
+    })();
+
+    return this.nearestWalkable(candidate);
+  }
+
+  /** Spawn points are picked before terrain is consulted, so nudge off any tree or lake. */
+  private nearestWalkable({ tx, ty }: { tx: number; ty: number }) {
+    for (let radius = 0; radius < 12; radius++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+          if (this.isWalkable(tx + dx, ty + dy)) return { tx: tx + dx, ty: ty + dy };
+        }
+      }
+    }
+    return { tx, ty };
+  }
+
+  /** Whether a player may stand on this tile. The client draws from the same map. */
+  private isWalkable(tx: number, ty: number) {
+    return isWalkableTile(this.terrain, tx, ty);
+  }
+
+  /**
+   * One step of tile-locked movement. Pressing a direction you aren't facing
+   * turns you and stops there, so a tap turns on the spot and a hold walks —
+   * then each subsequent step begins only once the previous one finishes.
+   */
+  private stepPlayer(sessionId: string, player: Player, now: number) {
+    const motion = this.motion.get(sessionId);
+    if (!motion) return;
+
+    if (player.moving) {
+      if (now < motion.stepEndsAt) return;
+      player.moving = false;
     }
 
-    const middleX = clamp(this.size.width / 2 + jitter, 0, this.size.width);
-    const middleY = clamp(this.size.height / 2 + jitter, 0, this.size.height);
+    const input = this.heldInputs.get(sessionId) ?? NO_INPUT;
+    // Keep going the way you're already facing if that's still held, so holding
+    // two directions doesn't jitter between them.
+    const direction = input[player.dir as Direction]
+      ? (player.dir as Direction)
+      : DIRECTIONS.find((candidate) => input[candidate]);
+    if (!direction) return;
 
-    switch (entry) {
-      case "west": return { x: inset, y: middleY };
-      case "east": return { x: this.size.width - inset, y: middleY };
-      case "north": return { x: middleX, y: inset };
-      default: return { x: middleX, y: this.size.height - inset };
+    if (player.dir !== direction) {
+      player.dir = direction;
+      motion.turnReadyAt = now + TURN_DELAY_MS;
+      return;
     }
+
+    if (now < motion.turnReadyAt) return;
+
+    const { dx, dy, edge } = STEPS[direction];
+    const tx = player.tx + dx;
+    const ty = player.ty + dy;
+
+    // Leaving the map is travel; a tree or a lake is just a wall. These are
+    // very different outcomes, so they're checked separately.
+    if (tx < 0 || ty < 0 || tx >= this.zone.tiles.width || ty >= this.zone.tiles.height) {
+      this.tryZoneCrossing(sessionId, player, edge);
+      return;
+    }
+
+    if (!this.isWalkable(tx, ty)) return;
+
+    player.tx = tx;
+    player.ty = ty;
+    player.moving = true;
+    motion.stepEndsAt = now + STEP_DURATION_MS;
   }
 
   /** Walking into an edge that leads somewhere hands the client off to that zone. */
-  private checkZoneCrossing(client: Client, player: Player) {
-    if (this.departing.has(client.sessionId) || player.inBattle) return;
+  private tryZoneCrossing(sessionId: string, player: Player, edge: Edge) {
+    if (this.departing.has(sessionId) || player.inBattle) return;
 
-    let edge: Edge | undefined;
-    if (player.x >= this.size.width - EDGE_THRESHOLD) edge = "east";
-    else if (player.x <= EDGE_THRESHOLD) edge = "west";
-    else if (player.y >= this.size.height - EDGE_THRESHOLD) edge = "south";
-    else if (player.y <= EDGE_THRESHOLD) edge = "north";
+    const destination = this.zone.exits[edge];
+    if (!destination) return;
 
-    const destination = edge && this.zone.exits[edge];
-    if (!edge || !destination) return;
-
-    this.departing.add(client.sessionId);
-    client.send("zone:travel", { zoneId: destination, entry: OPPOSITE_EDGE[edge] });
+    this.departing.add(sessionId);
+    this.clients.getById(sessionId)?.send("zone:travel", { zoneId: destination, entry: OPPOSITE_EDGE[edge] });
   }
 
   private onChallenge(client: Client, targetSessionId: string) {
@@ -186,7 +269,7 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     if (!challenger || !target || targetSessionId === client.sessionId) return;
     if (challenger.inBattle || target.inBattle) return;
     if (this.challenges.has(client.sessionId)) return;
-    if (distanceBetween(challenger, target) > CHALLENGE_RADIUS) {
+    if (tilesApart(challenger, target) > CHALLENGE_RADIUS_TILES) {
       client.send("challenge:failed", { reason: "too far away" });
       return;
     }
@@ -217,7 +300,7 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     // Both could have moved, disconnected, or been pulled into another battle
     // between the challenge and the answer.
     if (!challenger || !target || challenger.inBattle || target.inBattle) return;
-    if (distanceBetween(challenger, target) > CHALLENGE_RADIUS) {
+    if (tilesApart(challenger, target) > CHALLENGE_RADIUS_TILES) {
       client.send("challenge:failed", { reason: "too far away" });
       challengerClient?.send("challenge:failed", { reason: "too far away" });
       return;
@@ -288,7 +371,7 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     const cells = new Map<string, string[]>();
 
     this.state.players.forEach((player, sessionId) => {
-      const key = cellKey(player.x, player.y);
+      const key = cellKey(player.tx, player.ty);
       const bucket = cells.get(key);
       if (bucket) bucket.push(sessionId);
       else cells.set(key, [sessionId]);
@@ -300,8 +383,8 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
       if (!self || !previous || !client.view) continue;
 
       const next = new Set([client.sessionId]);
-      const column = Math.floor(self.x / CELL_SIZE);
-      const row = Math.floor(self.y / CELL_SIZE);
+      const column = Math.floor(self.tx / CELL_SIZE);
+      const row = Math.floor(self.ty / CELL_SIZE);
 
       for (let dx = -1; dx <= 1; dx++) {
         for (let dy = -1; dy <= 1; dy++) {
@@ -311,8 +394,8 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
             const other = this.state.players.get(otherId);
             if (!other) continue;
 
-            const limit = previous.has(otherId) ? VIEW_EXIT_RADIUS : VIEW_RADIUS;
-            if (Math.hypot(self.x - other.x, self.y - other.y) <= limit) next.add(otherId);
+            const limit = previous.has(otherId) ? VIEW_EXIT_RADIUS_TILES : VIEW_RADIUS_TILES;
+            if (distanceBetween(self, other) <= limit) next.add(otherId);
           }
         }
       }
@@ -334,8 +417,8 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     }
   }
 
-  private update(deltaMs: number) {
-    const delta = deltaMs / 1000;
+  private update() {
+    const now = Date.now();
     this.expireChallenges();
 
     if (++this.ticksSinceVisibility >= TICK_RATE / VISIBILITY_HZ) {
@@ -349,38 +432,16 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
         return;
       }
 
-      const input = this.heldInputs.get(sessionId) ?? NO_INPUT;
-
-      let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-      let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
-      const moving = dx !== 0 || dy !== 0;
-
-      if (moving) {
-        if (dx !== 0 && dy !== 0) {
-          dx *= Math.SQRT1_2;
-          dy *= Math.SQRT1_2;
-        }
-
-        player.x = clamp(player.x + dx * PLAYER_SPEED * delta, 0, this.size.width);
-        player.y = clamp(player.y + dy * PLAYER_SPEED * delta, 0, this.size.height);
-
-        const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : dy > 0 ? "down" : "up";
-        if (player.dir !== dir) player.dir = dir;
-
-        const client = this.clients.getById(sessionId);
-        if (client) this.checkZoneCrossing(client, player);
-      }
-
-      if (player.moving !== moving) player.moving = moving;
+      this.stepPlayer(sessionId, player, now);
     });
   }
 }
 
 /** Cell size is the exit radius, so the nine cells around a player always cover it. */
-const CELL_SIZE = VIEW_EXIT_RADIUS;
+const CELL_SIZE = VIEW_EXIT_RADIUS_TILES;
 
-function cellKey(x: number, y: number) {
-  return `${Math.floor(x / CELL_SIZE)}:${Math.floor(y / CELL_SIZE)}`;
+function cellKey(tx: number, ty: number) {
+  return `${Math.floor(tx / CELL_SIZE)}:${Math.floor(ty / CELL_SIZE)}`;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -388,7 +449,12 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function distanceBetween(a: Player, b: Player) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
+  return Math.hypot(a.tx - b.tx, a.ty - b.ty);
+}
+
+/** Adjacency, counting diagonals — the eight tiles around you, plus your own. */
+function tilesApart(a: Player, b: Player) {
+  return Math.max(Math.abs(a.tx - b.tx), Math.abs(a.ty - b.ty));
 }
 
 function sanitizeInput(raw: unknown): Input {

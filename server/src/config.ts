@@ -1,37 +1,47 @@
+/**
+ * Positions are in TILES everywhere on the server — players occupy a tile and
+ * step to the next one. Only the client multiplies by this to draw.
+ */
 export const TILE_SIZE = 32;
 
-/** Pixels per second — 4 tiles/s, roughly a Pokemon-style walking pace. */
-export const PLAYER_SPEED = 4 * TILE_SIZE;
+/**
+ * How long one tile step takes. A Pokemon walk is ~16 frames at 60fps (267ms);
+ * this is a touch brisker so roaming doesn't drag.
+ */
+export const STEP_DURATION_MS = 220;
+
+/**
+ * Pressing a direction you aren't facing turns you without moving, and only
+ * the *next* step actually walks. That's what makes a tap turn on the spot
+ * and a hold walk — without it there's no way to turn around in place.
+ */
+export const TURN_DELAY_MS = 90;
 
 /** Simulation ticks per second. */
 export const TICK_RATE = 20;
 
 /**
  * Per-zone-instance player cap. Sharding into multiple instances of the same
- * zone (not built yet) is what carries the game past this number — see
- * docs/ARCHITECTURE.md.
+ * zone is what carries the game past this number — see docs/ARCHITECTURE.md.
  */
 export const ZONE_CAPACITY = Number(process.env.ZONE_CAPACITY ?? 150);
 
 /** New arrivals land near each other rather than scattered across the zone. */
-export const SPAWN_SPREAD = 6 * TILE_SIZE;
-
-/** How close to an edge counts as walking out of the zone. */
-export const EDGE_THRESHOLD = 2;
+export const SPAWN_SPREAD_TILES = 6;
 
 /**
- * How far a player can see. Players outside this radius are not sent to that
- * client at all — this, not the zone cap, is what keeps per-client bandwidth
- * flat as a zone fills up.
+ * How far a player can see, in tiles. Players outside this are not sent to
+ * that client at all — this, not the zone cap, is what keeps per-client
+ * bandwidth flat as a zone fills up.
  */
-export const VIEW_RADIUS = 18 * TILE_SIZE;
+export const VIEW_RADIUS_TILES = 18;
 
 /**
- * Players already visible stay visible slightly past {@link VIEW_RADIUS}.
+ * Players already visible stay visible slightly past {@link VIEW_RADIUS_TILES}.
  * Without the gap, anyone loitering exactly on the boundary would be added
  * and removed repeatedly, and every re-add re-sends the whole entity.
  */
-export const VIEW_EXIT_RADIUS = VIEW_RADIUS * 1.1;
+export const VIEW_EXIT_RADIUS_TILES = 20;
 
 /**
  * Visibility recomputes at this rate rather than every tick. At walking pace
@@ -40,8 +50,8 @@ export const VIEW_EXIT_RADIUS = VIEW_RADIUS * 1.1;
  */
 export const VISIBILITY_HZ = 5;
 
-/** How close two players must stand before either can challenge the other. */
-export const CHALLENGE_RADIUS = 2 * TILE_SIZE;
+/** Challengeable when standing on or next to your tile, including diagonals. */
+export const CHALLENGE_RADIUS_TILES = 1;
 
 /** An unanswered challenge expires rather than pinning both players in place. */
 export const CHALLENGE_TIMEOUT_MS = 15_000;

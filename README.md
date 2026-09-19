@@ -31,10 +31,14 @@ or walk off the east edge to cross into the next zone.
 
 ## Status
 
-Server-authoritative movement at 20Hz; interest management so each client is
-only sent the players near it; the full challenge → battle →
-back-to-the-overworld handoff; and zones that shard into as many instances as
-the population needs, across as many server processes as you run.
+Tile-locked movement across terrain you have to walk around; interest
+management so each client is only sent the players near it; the full
+challenge → battle → back-to-the-overworld handoff; and zones that shard into
+as many instances as the population needs, across as many server processes as
+you run.
+
+The look is drawn in canvas code rather than made from art assets — it reads
+as a game rather than a debug view, but real polish needs a sprite sheet.
 
 Measured: 150 clients in one instance holding the full tick rate while
 carrying ~30 players each rather than all 150, and two processes sharing one
