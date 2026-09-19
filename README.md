@@ -26,19 +26,23 @@ npm run dev --workspace @covenant-world/server
 ```
 
 Open http://localhost:2567 in two tabs and walk around with WASD. Stand next
-to the other player and press <kbd>E</kbd> to challenge them into a battle.
+to the other player and press <kbd>E</kbd> to challenge them into a battle,
+or walk off the east edge to cross into the next zone.
 
 ## Status
 
-One zone with server-authoritative movement at 20Hz, interest management so
-each client is only sent the players near it, and the full challenge →
-battle → back-to-the-overworld handoff. Verified with 150 simultaneous
-clients holding the full tick rate while carrying ~28 players each instead
-of all 150.
+Server-authoritative movement at 20Hz; interest management so each client is
+only sent the players near it; the full challenge → battle →
+back-to-the-overworld handoff; and zones that shard into as many instances as
+the population needs, across as many server processes as you run.
+
+Measured: 150 clients in one instance holding the full tick rate while
+carrying ~30 players each rather than all 150, and two processes sharing one
+Redis registry distributing players across instances on both.
 
 The battle itself is a placeholder coin flip — the TCG ruleset is separate
-work. No zone sharding or portal integration yet; see
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for what comes next.
+work, as is any connection to the portal. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for what's left.
 
 ## Related repos
 

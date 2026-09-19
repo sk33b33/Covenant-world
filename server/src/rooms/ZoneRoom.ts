@@ -3,16 +3,18 @@ import { StateView, schema, t, type SchemaType } from "@colyseus/schema";
 import {
   CHALLENGE_RADIUS,
   CHALLENGE_TIMEOUT_MS,
+  EDGE_THRESHOLD,
   PLAYER_SPEED,
   SPAWN_SPREAD,
   TICK_RATE,
+  TILE_SIZE,
   VIEW_EXIT_RADIUS,
   VIEW_RADIUS,
   VISIBILITY_HZ,
-  WORLD,
   ZONE_CAPACITY,
   battleResultTopic,
 } from "../config.js";
+import { OPPOSITE_EDGE, getZone, isValidEntry, zoneSize, type Edge, type ZoneDefinition } from "../zones.js";
 import type { BattleOptions, BattleResult } from "./BattleRoom.js";
 
 export const Player = schema(
@@ -34,8 +36,13 @@ export const ZoneState = schema(
     // View-tagged: a client receives only the players its StateView holds,
     // which the visibility pass below keeps to those within VIEW_RADIUS.
     players: t.map(Player).view(),
-    /** Everyone in the zone, not just those visible — the map no longer says. */
+    /** Everyone in this instance, not just those visible — the map no longer says. */
     population: t.number().default(0),
+    zoneId: t.string().default(""),
+    zoneName: t.string().default(""),
+    /** Zone dimensions travel with the state, since instances differ in size. */
+    width: t.number().default(0),
+    height: t.number().default(0),
   },
   "ZoneState",
 );
@@ -61,8 +68,26 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
 
   private ticksSinceVisibility = 0;
 
-  onCreate() {
+  /** Which zone this instance is one of. Several instances of it may be running. */
+  private zone: ZoneDefinition = getZone(undefined);
+  private size = zoneSize(this.zone);
+
+  /** Players already told to travel, so the crossing only fires once. */
+  private departing = new Set<string>();
+
+  onCreate(options?: { zoneId?: string }) {
+    this.zone = getZone(options?.zoneId);
+    this.size = zoneSize(this.zone);
+
+    // The matchmaker filters on this, so a player asking for "meadow" is only
+    // ever offered a meadow instance.
+    this.setMetadata({ zoneId: this.zone.id });
+
     this.setState(new ZoneState());
+    this.state.zoneId = this.zone.id;
+    this.state.zoneName = this.zone.name;
+    this.state.width = this.size.width;
+    this.state.height = this.size.height;
 
     this.onMessage("input", (client, message) => {
       this.heldInputs.set(client.sessionId, sanitizeInput(message));
@@ -85,9 +110,9 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     this.presence.unsubscribe(battleResultTopic(this.roomId), this.onBattleResolved);
   }
 
-  onJoin(client: Client, options?: { name?: string }) {
+  onJoin(client: Client, options?: { name?: string; entry?: string }) {
     const player = new Player({
-      ...randomSpawn(),
+      ...this.spawnPoint(options?.entry),
       name: sanitizeName(options?.name, `Player ${this.clients.length}`),
     });
 
@@ -106,8 +131,52 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     this.state.population = this.state.players.size;
     this.heldInputs.delete(client.sessionId);
     this.visible.delete(client.sessionId);
+    this.departing.delete(client.sessionId);
     this.cancelChallengesInvolving(client.sessionId);
     client.view?.clear();
+  }
+
+  /**
+   * Arriving from a neighbouring zone puts you just inside the edge you walked
+   * in through; arriving fresh puts you near the middle.
+   */
+  private spawnPoint(entry?: string) {
+    const jitter = (Math.random() - 0.5) * SPAWN_SPREAD;
+    const inset = 2 * TILE_SIZE;
+
+    if (!isValidEntry(this.zone, entry)) {
+      return {
+        x: clamp(this.size.width / 2 + jitter, 0, this.size.width),
+        y: clamp(this.size.height / 2 + jitter, 0, this.size.height),
+      };
+    }
+
+    const middleX = clamp(this.size.width / 2 + jitter, 0, this.size.width);
+    const middleY = clamp(this.size.height / 2 + jitter, 0, this.size.height);
+
+    switch (entry) {
+      case "west": return { x: inset, y: middleY };
+      case "east": return { x: this.size.width - inset, y: middleY };
+      case "north": return { x: middleX, y: inset };
+      default: return { x: middleX, y: this.size.height - inset };
+    }
+  }
+
+  /** Walking into an edge that leads somewhere hands the client off to that zone. */
+  private checkZoneCrossing(client: Client, player: Player) {
+    if (this.departing.has(client.sessionId) || player.inBattle) return;
+
+    let edge: Edge | undefined;
+    if (player.x >= this.size.width - EDGE_THRESHOLD) edge = "east";
+    else if (player.x <= EDGE_THRESHOLD) edge = "west";
+    else if (player.y >= this.size.height - EDGE_THRESHOLD) edge = "south";
+    else if (player.y <= EDGE_THRESHOLD) edge = "north";
+
+    const destination = edge && this.zone.exits[edge];
+    if (!edge || !destination) return;
+
+    this.departing.add(client.sessionId);
+    client.send("zone:travel", { zoneId: destination, entry: OPPOSITE_EDGE[edge] });
   }
 
   private onChallenge(client: Client, targetSessionId: string) {
@@ -292,11 +361,14 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
           dy *= Math.SQRT1_2;
         }
 
-        player.x = clamp(player.x + dx * PLAYER_SPEED * delta, 0, WORLD.width);
-        player.y = clamp(player.y + dy * PLAYER_SPEED * delta, 0, WORLD.height);
+        player.x = clamp(player.x + dx * PLAYER_SPEED * delta, 0, this.size.width);
+        player.y = clamp(player.y + dy * PLAYER_SPEED * delta, 0, this.size.height);
 
         const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : dy > 0 ? "down" : "up";
         if (player.dir !== dir) player.dir = dir;
+
+        const client = this.clients.getById(sessionId);
+        if (client) this.checkZoneCrossing(client, player);
       }
 
       if (player.moving !== moving) player.moving = moving;
@@ -309,13 +381,6 @@ const CELL_SIZE = VIEW_EXIT_RADIUS;
 
 function cellKey(x: number, y: number) {
   return `${Math.floor(x / CELL_SIZE)}:${Math.floor(y / CELL_SIZE)}`;
-}
-
-function randomSpawn() {
-  return {
-    x: clamp(WORLD.width / 2 + (Math.random() - 0.5) * SPAWN_SPREAD, 0, WORLD.width),
-    y: clamp(WORLD.height / 2 + (Math.random() - 0.5) * SPAWN_SPREAD, 0, WORLD.height),
-  };
 }
 
 function clamp(value: number, min: number, max: number) {

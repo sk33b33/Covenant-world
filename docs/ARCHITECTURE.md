@@ -17,10 +17,15 @@ simulated space and splitting the rest into parallel copies of that space.
 
 **Decision: each zone instance caps at 100–150 concurrent players.** At
 1000 total players that's 7–10 zone instances running at once, each cheap
-enough for a single process to simulate. A matchmaker/lobby assigns a
-player entering "Route 1" to whichever `route-1` instance has room
-(`route-1-a`, `route-1-b`, ...), spinning up a new instance when all
-existing ones are full.
+enough for a single process to simulate. A player entering "Meadow" is
+matched into whichever meadow instance has room, and a new instance opens
+when the existing ones are full.
+
+Two players in the same zone but different instances never see each other.
+That's the trade the design makes: a zone is a *place*, not a single shared
+room, and "which copy of the place am I in" is decided at the door. Grouping
+friends into the same instance is a known gap — `joinOrCreate` currently
+takes whichever instance has space.
 
 ## Components
 
@@ -69,10 +74,25 @@ existing ones are full.
 
   The zone's real population no longer equals what a client can see, so
   `ZoneState.population` carries it as an untagged field.
-- **Cross-zone coordination**: Redis holds the live room registry (zone name
-  → instance → current player count) so the matchmaker can route new
-  entrants, and pub/sub carries anything that isn't zone-local — chat,
-  friend presence, a challenge sent to a player in a different instance.
+- **Sharding**: zone instances are ordinary Colyseus rooms filtered by
+  `zoneId` (`gameServer.define("zone", ZoneRoom).filterBy(["zoneId"])`). A
+  request for a zone only matches instances of *that* zone, and the
+  matchmaker opens another instance when they're all full. Nothing else is
+  needed to split one zone into many.
+
+- **Cross-zone coordination**: with `REDIS_URL` set, Redis holds the room
+  registry and carries presence pub/sub, so several server processes share
+  one world: a player can connect to any process and be routed to the
+  instance they need, wherever it's actually running. Without it everything
+  runs locally, which is what `npm run dev` does. The same pub/sub carries
+  anything that isn't room-local — today that's battle results; later chat
+  and friend presence.
+
+- **Travel between zones**: walking into an edge that leads somewhere makes
+  the server send `zone:travel`, and the client leaves its current room and
+  joins an instance of the destination, entering from the matching edge. So
+  crossing a zone boundary and being moved to a different instance are the
+  same mechanism.
 - **Battles**: a proximity challenge between two players spawns a separate,
   ephemeral "battle room" — ordinary turn-based TCG logic, no realtime
   movement concerns — while both players' overworld characters stay frozen in
@@ -100,8 +120,16 @@ anything yet; positions live and die with the server process.
 
 Zone servers are long-lived processes holding live in-memory room state —
 they need a host with persistent processes and sticky WebSocket sessions
-(Fly.io, Railway, a small VM/ECS fleet), not a serverless platform. Not
-decided yet for this prototype; running locally is enough for now.
+(Fly.io, Railway, a small VM/ECS fleet), not a serverless platform. Which
+host isn't decided yet.
+
+Running more than one process needs three things, all already wired:
+`REDIS_URL` so they share a registry, `PUBLIC_ADDRESS` per process so a
+process can tell clients how to reach rooms it hosts, and something in front
+of the fleet to spread incoming connections. Verified locally with two
+processes against one Redis: 20 players connecting through a single process
+were distributed across instances running on *both*, with clients
+transparently redirected to whichever process hosts their instance.
 
 ## Anti-cheat baseline (later, not in the prototype)
 
@@ -140,5 +168,10 @@ the number the whole sharding plan is built on.
    result back to the zone. The battle *itself* is a placeholder coin flip;
    the TCG ruleset is a separate piece of work.~~
 4. ~~AOI / interest management within a zone.~~
-5. Multi-instance sharding + matchmaker + Redis registry.
+5. ~~Multi-instance sharding + matchmaker + Redis registry, and travel
+   between zones.~~
 6. Wire to the portal (see `docs/INTEGRATION.md`).
+
+Still open, roughly in order of how soon they'll bite: keeping a party in the
+same instance, the real TCG ruleset, persistence, and a load balancer in front
+of the process fleet.

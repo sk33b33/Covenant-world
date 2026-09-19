@@ -30,48 +30,83 @@ let lastOverlaySignature = null;
 
 const config = await fetch("/config.json").then((res) => res.json());
 const endpoint = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
-const name = new URLSearchParams(location.search).get("name") ?? "";
+const params = new URLSearchParams(location.search);
+const name = params.get("name") ?? "";
 const colyseus = new Colyseus.Client(endpoint);
 
 let room;
 let battleRoom = null;
-try {
-  room = await colyseus.joinOrCreate("zone", { name });
-} catch (error) {
-  statusEl.textContent = `could not join: ${error.message}`;
-  throw error;
+let traveling = false;
+
+/**
+ * Joins a zone, or moves to another one. The matchmaker picks which *instance*
+ * of that zone we land in, so this is also what happens when an instance fills
+ * up and a new one opens.
+ */
+async function connectToZone(zoneId, entry) {
+  traveling = true;
+  statusEl.textContent = "travelling…";
+
+  if (room) {
+    try {
+      await room.leave();
+    } catch {
+      // Already gone; nothing to wind down.
+    }
+  }
+
+  // Nobody from the old zone exists here.
+  rendered.clear();
+  nearby = null;
+  backToRoaming("");
+
+  try {
+    room = await colyseus.joinOrCreate("zone", { name, zoneId, entry });
+  } catch (error) {
+    statusEl.textContent = `could not join: ${error.message}`;
+    throw error;
+  }
+
+  // This is a test client — the live room handles are deliberately reachable
+  // from the console (and from automated smoke tests).
+  window.room = room;
+  traveling = false;
+  statusEl.textContent = "connected";
+
+  room.onLeave(() => {
+    if (traveling) return;
+    statusEl.textContent = "disconnected";
+    populationEl.textContent = "";
+  });
+
+  room.onMessage("challenge:sent", ({ name: target }) => {
+    mode = "awaiting";
+    incomingChallenge = { name: target };
+  });
+  room.onMessage("challenge:received", ({ from, name: challenger }) => {
+    if (mode !== "roaming") return;
+    mode = "challenged";
+    incomingChallenge = { from, name: challenger };
+  });
+  room.onMessage("challenge:declined", ({ by }) => backToRoaming(`${by} declined`));
+  room.onMessage("challenge:expired", () => backToRoaming("challenge expired"));
+  room.onMessage("challenge:failed", ({ reason }) => backToRoaming(reason));
+  room.onMessage("battle:start", ({ reservation }) => enterBattle(reservation));
+  room.onMessage("battle:result", ({ outcome, won }) => {
+    // The battle room's own state drives the result screen; this is the zone's
+    // authoritative copy, and the only word a client that never made it into
+    // the battle room gets.
+    if (mode !== "battling") showNotice(outcome === "played" ? (won ? "you won" : "you lost") : `battle ${outcome}`);
+  });
+  room.onMessage("zone:travel", ({ zoneId: destination, entry: arrivalEdge }) => {
+    // Held keys belong to the room we're leaving.
+    for (const key of Object.keys(held)) held[key] = false;
+    lastSent = null;
+    connectToZone(destination, arrivalEdge);
+  });
 }
 
-// This is a test client — the live room handles are deliberately reachable from
-// the console (and from automated smoke tests).
-window.room = room;
-
-statusEl.textContent = "connected";
-roomEl.textContent = `zone ${room.roomId}`;
-room.onLeave(() => {
-  statusEl.textContent = "disconnected";
-  populationEl.textContent = "";
-});
-
-room.onMessage("challenge:sent", ({ name: target }) => {
-  mode = "awaiting";
-  incomingChallenge = { name: target };
-});
-room.onMessage("challenge:received", ({ from, name: challenger }) => {
-  if (mode !== "roaming") return;
-  mode = "challenged";
-  incomingChallenge = { from, name: challenger };
-});
-room.onMessage("challenge:declined", ({ by }) => backToRoaming(`${by} declined`));
-room.onMessage("challenge:expired", () => backToRoaming("challenge expired"));
-room.onMessage("challenge:failed", ({ reason }) => backToRoaming(reason));
-room.onMessage("battle:start", ({ reservation }) => enterBattle(reservation));
-room.onMessage("battle:result", ({ outcome, won }) => {
-  // The battle room's own state drives the result screen; this is the zone's
-  // authoritative copy, and the only word a client that never made it into
-  // the battle room gets.
-  if (mode !== "battling") showNotice(outcome === "played" ? (won ? "you won" : "you lost") : `battle ${outcome}`);
-});
+await connectToZone(params.get("zone") ?? config.startingZone);
 
 window.addEventListener("keydown", onKey);
 window.addEventListener("keyup", onKey);
@@ -146,6 +181,11 @@ function frame(now) {
   const delta = Math.min((now - previousFrame) / 1000, 0.1);
   previousFrame = now;
 
+  if (traveling) {
+    requestAnimationFrame(frame);
+    return;
+  }
+
   sendInputIfChanged();
   interpolate(delta);
   draw();
@@ -196,27 +236,30 @@ function interpolate(delta) {
   }
 
   nearby = closest;
-  // players.size is what this client can see, not the zone's population —
+  // players.size is what this client can see, not the instance's population —
   // interest management means those are different numbers now.
-  populationEl.textContent = `${players.size} visible · ${room.state.population} / ${config.zoneCapacity} in zone`;
+  populationEl.textContent = `${players.size} visible · ${room.state.population} / ${config.zoneCapacity} here`;
+  roomEl.textContent = `${room.state.zoneName} · instance ${room.roomId}`;
 }
 
 function draw() {
   const self = rendered.get(room.sessionId);
+  // Instances of different zones are different sizes, so bounds come from state.
+  const zone = { width: room.state?.width || canvas.width, height: room.state?.height || canvas.height };
   const camera = {
-    x: clamp((self?.x ?? config.world.width / 2) - canvas.width / 2, 0, Math.max(0, config.world.width - canvas.width)),
-    y: clamp((self?.y ?? config.world.height / 2) - canvas.height / 2, 0, Math.max(0, config.world.height - canvas.height)),
+    x: clamp((self?.x ?? zone.width / 2) - canvas.width / 2, 0, Math.max(0, zone.width - canvas.width)),
+    y: clamp((self?.y ?? zone.height / 2) - canvas.height / 2, 0, Math.max(0, zone.height - canvas.height)),
   };
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawGround(camera);
+  drawGround(camera, zone);
 
   for (const [sessionId, entry] of rendered) {
     drawPlayer(entry, sessionId, camera);
   }
 }
 
-function drawGround(camera) {
+function drawGround(camera, zone) {
   ctx.fillStyle = "#26301f";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -235,7 +278,7 @@ function drawGround(camera) {
   ctx.stroke();
 
   ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
-  ctx.strokeRect(-camera.x + 0.5, -camera.y + 0.5, config.world.width, config.world.height);
+  ctx.strokeRect(-camera.x + 0.5, -camera.y + 0.5, zone.width, zone.height);
 }
 
 function drawPlayer(entry, sessionId, camera) {

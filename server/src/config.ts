@@ -1,12 +1,5 @@
 export const TILE_SIZE = 32;
 
-export const WORLD_TILES = { width: 100, height: 75 };
-
-export const WORLD = {
-  width: WORLD_TILES.width * TILE_SIZE,
-  height: WORLD_TILES.height * TILE_SIZE,
-};
-
 /** Pixels per second — 4 tiles/s, roughly a Pokemon-style walking pace. */
 export const PLAYER_SPEED = 4 * TILE_SIZE;
 
@@ -22,6 +15,9 @@ export const ZONE_CAPACITY = Number(process.env.ZONE_CAPACITY ?? 150);
 
 /** New arrivals land near each other rather than scattered across the zone. */
 export const SPAWN_SPREAD = 6 * TILE_SIZE;
+
+/** How close to an edge counts as walking out of the zone. */
+export const EDGE_THRESHOLD = 2;
 
 /**
  * How far a player can see. Players outside this radius are not sent to that
