@@ -283,7 +283,7 @@ function interpolate(delta) {
   // players.size is what this client can see, not the instance's population —
   // interest management means those are different numbers now.
   populationEl.textContent = `${players.size} visible · ${room.state.population} / ${config.zoneCapacity} here`;
-  roomEl.textContent = `${room.state.zoneName} · instance ${room.roomId}`;
+  roomEl.textContent = `${room.state.zoneName} — ${room.state.zoneSubtitle} · instance ${room.roomId}`;
 }
 
 function draw() {
@@ -311,17 +311,112 @@ function draw() {
   for (const item of standing) item.draw();
 }
 
-// Shades within a kind sit close together on purpose: enough variation that a
-// field isn't a flat slab, not so much that it reads as a checkerboard.
-const GROUND = {
-  grass: ["#4c7b42", "#4e7d44", "#4a783f", "#507f46"],
-  flowers: ["#4c7b42"],
-  path: ["#b09566", "#ad9263", "#b3996a"],
-  sand: ["#d6c69a", "#d3c396"],
-  water: ["#2f6fa8", "#30719f"],
-  tree: ["#46743c"],
-  rock: ["#4c7b42"],
+// One palette + decoration set per chapter energy, matching the zone's theme
+// (server-assigned per zone, see server/src/zones.ts). Shades within a kind
+// sit close together on purpose: enough variation that a field isn't a flat
+// slab, not so much that it reads as a checkerboard.
+const THEMES = {
+  // Genesis — Eden: bright, lush, untroubled.
+  light: {
+    bg: "#16240f",
+    ground: {
+      grass: ["#5a8f49", "#5c9250", "#57894a", "#619752"],
+      flowers: ["#5a8f49"],
+      path: ["#c9ad78", "#c4a670", "#cdb280"],
+      sand: ["#e3d3a0", "#e0cf9c"],
+      water: ["#3f8fd0", "#4192cf"],
+      tree: ["#54874a"],
+      rock: ["#5a8f49"],
+    },
+    flowerColors: ["#f0dd6e", "#ea88ac", "#e8e8f2"],
+    tree: "oak",
+    rock: "boulder",
+  },
+  // Exodus — the wilderness: sand to the horizon, one oasis.
+  fire: {
+    bg: "#2a1c0d",
+    ground: {
+      grass: ["#8a7a44"],
+      flowers: ["#8a7a44"],
+      path: ["#c79a5a", "#c29556"],
+      sand: ["#e2b877", "#dcae6c", "#e6c084"],
+      water: ["#2f8f95", "#31989e"],
+      tree: ["#caa25f"],
+      rock: ["#caa25f"],
+    },
+    flowerColors: ["#f0dd6e"],
+    tree: "palm",
+    rock: "boulder",
+  },
+  // Kings — the royal city: streets and stone.
+  earth: {
+    bg: "#221d16",
+    ground: {
+      grass: ["#7c9457"],
+      flowers: ["#7c9457"],
+      path: ["#a89a83", "#a2937c", "#ad9f88"],
+      sand: ["#c9b899"],
+      water: ["#3f74a8"],
+      tree: ["#a89a83"],
+      rock: ["#a89a83"],
+    },
+    flowerColors: ["#e8d26a"],
+    tree: "oak",
+    rock: "building",
+  },
+  // Prophets — the highlands: dry, windswept, rocky.
+  spirit: {
+    bg: "#1c1f22",
+    ground: {
+      grass: ["#6c7a63", "#6f7d66", "#697760"],
+      flowers: ["#6c7a63"],
+      path: ["#9c9a92", "#96948c"],
+      sand: ["#b7b2a2"],
+      water: ["#4f7d8a"],
+      tree: ["#63705f"],
+      rock: ["#63705f"],
+    },
+    flowerColors: ["#e8e8f2", "#c9b6e0"],
+    tree: "oak",
+    rock: "crag",
+  },
+  // Gospel — Galilee: fresh green shores around a great lake.
+  water: {
+    bg: "#0f2420",
+    ground: {
+      grass: ["#4e8a5e", "#50905f", "#4b8459"],
+      flowers: ["#4e8a5e"],
+      path: ["#b3a077"],
+      sand: ["#d6c69a"],
+      water: ["#2f7fa0", "#2f86a8", "#337f9c"],
+      tree: ["#487d55"],
+      rock: ["#487d55"],
+    },
+    flowerColors: ["#e8e8f2", "#f0dd6e"],
+    tree: "oak",
+    rock: "boulder",
+  },
+  // Revelation — the new creation: scorched, dark, unquiet.
+  shadow: {
+    bg: "#180a12",
+    ground: {
+      grass: ["#3c3540", "#3f3742", "#39323d"],
+      flowers: ["#3c3540"],
+      path: ["#332a34", "#362d37"],
+      sand: ["#4a3f47"],
+      water: ["#1c1224", "#20142a"],
+      tree: ["#332a34"],
+      rock: ["#332a34"],
+    },
+    flowerColors: ["#c96b6b"],
+    tree: "dead",
+    rock: "rubble",
+  },
 };
+
+function currentTheme() {
+  return THEMES[room.state?.zoneTheme] ?? THEMES.light;
+}
 
 /** Stable per-tile variation, so the same tile always looks the same. */
 function tileNoise(tx, ty) {
@@ -349,7 +444,9 @@ function visibleTiles(camera) {
 
 function drawTerrain(camera, zone) {
   const size = config.tileSize;
-  ctx.fillStyle = "#1d2a18";
+  const theme = currentTheme();
+
+  ctx.fillStyle = theme.bg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const { fromX, toX, fromY, toY } = visibleTiles(camera);
@@ -361,7 +458,7 @@ function drawTerrain(camera, zone) {
       const noise = tileNoise(tx, ty);
       const x = Math.round(tx * size - camera.x);
       const y = Math.round(ty * size - camera.y);
-      const palette = GROUND[kind] ?? GROUND.grass;
+      const palette = theme.ground[kind] ?? theme.ground.grass;
 
       ctx.fillStyle = palette[Math.floor(noise * palette.length)];
       ctx.fillRect(x, y, size, size);
@@ -378,7 +475,7 @@ function drawTerrain(camera, zone) {
         ctx.fillRect(x + 6, y + 18, 5, 3);
         ctx.fillRect(x + 18, y + 9, 5, 3);
       } else if (kind === "flowers") {
-        const colours = ["#e8d26a", "#e07a9a", "#dcdcea"];
+        const colours = theme.flowerColors;
         ctx.fillStyle = colours[Math.floor(noise * colours.length)];
         ctx.fillRect(x + 8 + noise * 6, y + 10 + noise * 8, 4, 4);
         ctx.fillRect(x + 19, y + 20, 3, 3);
@@ -397,6 +494,7 @@ function drawTerrain(camera, zone) {
 /** Trees and rocks stand up out of their tile, so they sort with the players. */
 function collectTallTerrain(camera, into) {
   const size = config.tileSize;
+  const theme = currentTheme();
   const { fromX, toX, fromY, toY } = visibleTiles(camera);
 
   for (let ty = fromY; ty <= toY; ty++) {
@@ -407,18 +505,24 @@ function collectTallTerrain(camera, into) {
       const y = ty * size - camera.y;
       into.push({
         y: ty * size + size,
-        draw: () => (kind === "tree" ? drawTree(x, y, tileNoise(tx, ty)) : drawRock(x, y)),
+        draw: () =>
+          kind === "tree"
+            ? drawTree(x, y, tileNoise(tx, ty), theme.tree)
+            : drawRock(x, y, tileNoise(tx, ty), theme.rock),
       });
     }
   }
 }
 
-function drawTree(x, y, noise) {
+function drawTree(x, y, noise, style) {
+  if (style === "palm") return drawPalm(x, y, noise);
+  if (style === "dead") return drawDeadTree(x, y, noise);
+  drawOak(x, y, noise);
+}
+
+function drawOak(x, y, noise) {
   const size = config.tileSize;
-  ctx.fillStyle = "rgba(0,0,0,0.18)";
-  ctx.beginPath();
-  ctx.ellipse(x + size / 2, y + size - 4, size * 0.34, size * 0.14, 0, 0, Math.PI * 2);
-  ctx.fill();
+  groundShadow(x, y, size, 0.34, 0.14);
 
   ctx.fillStyle = "#6b4a2f";
   ctx.fillRect(x + size / 2 - 3, y + size - 14, 6, 12);
@@ -434,12 +538,73 @@ function drawTree(x, y, noise) {
   ctx.fill();
 }
 
-function drawRock(x, y) {
+function drawPalm(x, y, noise) {
   const size = config.tileSize;
-  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  const cx = x + size / 2;
+  const top = y + size / 2 - 12;
+  groundShadow(x, y, size, 0.3, 0.12);
+
+  // A gently curved trunk, leaning with the wind rather than dead straight.
+  const lean = (noise - 0.5) * 6;
+  ctx.strokeStyle = "#8a6a3c";
+  ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.ellipse(x + size / 2, y + size - 6, size * 0.3, size * 0.12, 0, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.moveTo(cx, y + size - 2);
+  ctx.quadraticCurveTo(cx + lean, y + size / 2, cx + lean * 1.4, top);
+  ctx.stroke();
+
+  const frondColour = "#3f8a4a";
+  for (const angle of [-70, -35, 0, 35, 70]) {
+    const rad = (angle * Math.PI) / 180;
+    ctx.strokeStyle = frondColour;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx + lean * 1.4, top);
+    ctx.quadraticCurveTo(
+      cx + lean * 1.4 + Math.sin(rad) * 14,
+      top - 6,
+      cx + lean * 1.4 + Math.sin(rad) * 20,
+      top + Math.cos(rad) * 4,
+    );
+    ctx.stroke();
+  }
+}
+
+function drawDeadTree(x, y, noise) {
+  const size = config.tileSize;
+  const cx = x + size / 2;
+  groundShadow(x, y, size, 0.28, 0.11);
+
+  ctx.strokeStyle = "#241f26";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(cx, y + size - 2);
+  ctx.lineTo(cx, y + size / 2 - 6);
+  ctx.stroke();
+
+  ctx.lineWidth = 2.5;
+  for (const [dx, dy, ex, ey] of [
+    [0, -4, -9, -14],
+    [0, -10, 8, -18],
+    [0, -16, -6 * (noise > 0.5 ? 1 : -1), -22],
+  ]) {
+    ctx.beginPath();
+    ctx.moveTo(cx + dx, y + size / 2 + dy);
+    ctx.lineTo(cx + ex, y + size / 2 + ey);
+    ctx.stroke();
+  }
+}
+
+function drawRock(x, y, noise, style) {
+  if (style === "building") return drawBuilding(x, y, noise);
+  if (style === "crag") return drawCrag(x, y, noise);
+  if (style === "rubble") return drawRubble(x, y, noise);
+  drawBoulder(x, y);
+}
+
+function drawBoulder(x, y) {
+  const size = config.tileSize;
+  groundShadow(x, y, size, 0.3, 0.12, 6);
 
   ctx.fillStyle = "#7d8285";
   ctx.beginPath();
@@ -455,6 +620,88 @@ function drawRock(x, y) {
   ctx.lineTo(x + 22, y + 8);
   ctx.lineTo(x + 18, y + 17);
   ctx.closePath();
+  ctx.fill();
+}
+
+function drawBuilding(x, y, noise) {
+  const size = config.tileSize;
+  groundShadow(x, y, size, 0.36, 0.13, 4);
+
+  const wall = ["#d9c9a6", "#cdbd9a", "#c3b28f"][Math.floor(noise * 3)];
+  const roof = ["#8a4a3a", "#7a4034", "#96543f"][Math.floor((1 - noise) * 3)];
+
+  ctx.fillStyle = wall;
+  ctx.fillRect(x + 4, y + size / 2 - 4, size - 8, size / 2);
+
+  ctx.fillStyle = roof;
+  ctx.beginPath();
+  ctx.moveTo(x + 2, y + size / 2 - 4);
+  ctx.lineTo(x + size / 2, y + 4);
+  ctx.lineTo(x + size - 2, y + size / 2 - 4);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "#5c4632";
+  ctx.fillRect(x + size / 2 - 3, y + size - 12, 6, 10);
+  ctx.fillStyle = "rgba(255, 224, 138, 0.55)";
+  ctx.fillRect(x + 8, y + size / 2 + 2, 4, 4);
+  ctx.fillRect(x + size - 12, y + size / 2 + 2, 4, 4);
+}
+
+function drawCrag(x, y, noise) {
+  const size = config.tileSize;
+  groundShadow(x, y, size, 0.32, 0.12, 6);
+
+  ctx.fillStyle = "#565a68";
+  ctx.beginPath();
+  ctx.moveTo(x + 4, y + size - 4);
+  ctx.lineTo(x + 8, y + size * 0.45);
+  ctx.lineTo(x + size / 2 - 2, y + 2);
+  ctx.lineTo(x + size / 2 + 6, y + size * 0.4);
+  ctx.lineTo(x + size - 6, y + size * 0.35);
+  ctx.lineTo(x + size - 3, y + size - 4);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "rgba(255,255,255,0.1)";
+  ctx.beginPath();
+  ctx.moveTo(x + size / 2 - 2, y + 2);
+  ctx.lineTo(x + size / 2 + 6, y + size * 0.4);
+  ctx.lineTo(x + size / 2 - 4, y + size * 0.5);
+  ctx.closePath();
+  ctx.fill();
+
+  if (noise > 0.5) {
+    // A wisp of low cloud snagged on the peak — this is the windswept zone.
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(x + size / 2 - 8, y - 2, 16, 3);
+  }
+}
+
+function drawRubble(x, y, noise) {
+  const size = config.tileSize;
+  groundShadow(x, y, size, 0.34, 0.13, 6);
+
+  ctx.fillStyle = "#2b2530";
+  ctx.beginPath();
+  ctx.moveTo(x + 3, y + size - 4);
+  ctx.lineTo(x + 9, y + size * 0.5);
+  ctx.lineTo(x + size / 2, y + size * 0.2);
+  ctx.lineTo(x + size - 8, y + size * 0.55);
+  ctx.lineTo(x + size - 3, y + size - 4);
+  ctx.closePath();
+  ctx.fill();
+
+  // A coal-like glow in the cracks — this is ruin, not just stone.
+  ctx.fillStyle = `rgba(224, 90, 70, ${0.25 + noise * 0.25})`;
+  ctx.fillRect(x + size / 2 - 2, y + size * 0.55, 3, 6);
+  ctx.fillRect(x + size / 2 + 6, y + size * 0.65, 2, 5);
+}
+
+function groundShadow(x, y, size, rx, ry, offset = 4) {
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.beginPath();
+  ctx.ellipse(x + size / 2, y + size - offset, size * rx, size * ry, 0, 0, Math.PI * 2);
   ctx.fill();
 }
 

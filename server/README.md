@@ -12,12 +12,13 @@ Then open http://localhost:2567 in two tabs to see two players share a zone.
 
 ## Zones, instances and processes
 
-`src/zones.ts` is the world map: each zone has a size and a set of edges that
-lead to other zones. A zone may be running as several **instances** at once —
-they're ordinary rooms filtered by `zoneId`, so a player asking for "meadow"
-joins a meadow instance with space, and the matchmaker opens another when
-they're all full. Players in different instances of the same zone never see
-each other.
+`src/zones.ts` is the world map: six zones, one per chapter of The Covenant's
+story mode (Genesis through Revelation), connected west to east, each themed
+to its chapter's energy type — see `docs/ARCHITECTURE.md` for the table. A
+zone may be running as several **instances** at once — they're ordinary rooms
+filtered by `zoneId`, so a player asking for "genesis" joins a genesis
+instance with space, and the matchmaker opens another when they're all full.
+Players in different instances of the same zone never see each other.
 
 Walking into an edge that leads somewhere sends `zone:travel`, and the client
 joins an instance of the neighbouring zone, entering from the matching edge.
@@ -43,7 +44,8 @@ sharding happen with a handful of clients.
 ## What's here
 
 - `src/config.ts` — walk speed, tick rate, capacity, view and challenge range.
-- `src/zones.ts` — the zone definitions and how they connect.
+- `src/zones.ts` — the six zones (one per story chapter) and how they connect.
+- `src/terrain.ts` — one terrain generator per zone, and the collision table.
 - `src/rooms/ZoneRoom.ts` — the overworld: state schema, input, simulation, challenges.
 - `src/rooms/BattleRoom.ts` — one ephemeral room per battle.
 - `src/index.ts` — boots the server and serves the test client.
@@ -93,17 +95,24 @@ fetches the same map from `/zones/:zoneId/terrain.json` to draw it. One table
 drives both, so a tile that looks solid always is.
 
 It's generated rather than hand-authored because a real game needs a map
-editor and this needed something with the right *shape* — open ground, water
-and woodland to route around, paths that reach the exits — to build collision
-and rendering against.
+editor and this needed something with the right *shape* per zone — Eden's
+river, the wilderness's sand, the royal city's street grid, Galilee's lake —
+to build collision and rendering against. One generator function per zone id,
+not one generic algorithm reskinned six times: Kings' city and Gospel's lake
+are structurally different maps.
 
 Walking off the map edge and walking into a tree are deliberately different:
 the first is travel to the neighbouring zone, the second is just a wall.
+Every zone connects to its neighbour through a carved path at the middle row
+— the ford or street a player is meant to follow to cross whatever the
+zone's water or buildings put in the way. Terrain elsewhere isn't guaranteed
+walkable in a straight line, same as any game with a river or a building in
+it.
 
 ## Challenges and battles
 
-Stand within two tiles of another player and either of you can challenge the
-other. On accept, the zone spawns a `battle` room, reserves a seat for each
+Stand next to another player (including diagonally) and either of you can
+challenge the other. On accept, the zone spawns a `battle` room, reserves a seat for each
 player, and freezes both characters in the overworld; when the battle
 publishes its result the zone unfreezes them.
 

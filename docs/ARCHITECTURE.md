@@ -17,8 +17,8 @@ simulated space and splitting the rest into parallel copies of that space.
 
 **Decision: each zone instance caps at 100–150 concurrent players.** At
 1000 total players that's 7–10 zone instances running at once, each cheap
-enough for a single process to simulate. A player entering "Meadow" is
-matched into whichever meadow instance has room, and a new instance opens
+enough for a single process to simulate. A player entering "Genesis" is
+matched into whichever Genesis instance has room, and a new instance opens
 when the existing ones are full.
 
 Two players in the same zone but different instances never see each other.
@@ -26,6 +26,48 @@ That's the trade the design makes: a zone is a *place*, not a single shared
 room, and "which copy of the place am I in" is decided at the door. Grouping
 friends into the same instance is a known gap — `joinOrCreate` currently
 takes whichever instance has space.
+
+## World map
+
+Six zones, one per chapter of The Covenant's card game story mode
+(`src/data/story` in the sibling `The-Covenant` repo) — Genesis through
+Revelation, in that order, connected west to east so walking the map
+retraces the story's arc. Each zone's theme matches its chapter's energy
+type, which the card game already defines: Genesis is light, Exodus fire,
+Kings earth, Prophets spirit, Gospel water, Revelation shadow.
+
+| Zone | Chapter subtitle | Theme | Setting |
+| --- | --- | --- | --- |
+| `genesis` | In the beginning | light | Eden — a garden fed by a gentle river |
+| `exodus` | Let my people go | fire | the wilderness — sand, one oasis |
+| `kings` | A crown and a harp | earth | the royal city — streets and stone |
+| `prophets` | A voice in the wilderness | spirit | the highlands — dry, windswept, rocky |
+| `gospel` | The Word made flesh | water | Galilee — a great lake, a shoreline |
+| `revelation` | Behold, I make all things new | shadow | the new creation — scorched, unquiet |
+
+The card game only has Genesis and Exodus written so far — the other four
+chapters are locked with no encounters yet. The overworld doesn't need
+encounter data to exist as a *place*, so all six zones are built now; battle
+content catches up whenever those chapters do. This is metadata only —
+covenant-world does not import anything from The-Covenant's engine (see
+`docs/INTEGRATION.md` for why that's deferred).
+
+Terrain generation (`server/src/terrain.ts`) is per-zone: one generator
+function per zone id, sharing a small toolkit (`sprinkle`, `patch`, `river`)
+rather than one generic algorithm parameterized to look different — Kings'
+street grid and Gospel's lake are structurally different maps, not the same
+map recolored. The *mechanical* tile kinds stay universal (grass, path, sand,
+flowers, tree, rock, water — see `TERRAIN` in `terrain.ts`); a zone's theme
+only changes how densely they're used and what the client draws them as
+(`tree` is an oak in Genesis, a palm in Exodus, a bare blackened trunk in
+Revelation; `rock` is a boulder, a building in Kings, a crag in Prophets, glowing rubble in Revelation).
+
+Every zone connects to its neighbour via a carved path through the middle
+row — the ford, bridge, or street a player is meant to follow to cross
+whatever the zone's centerpiece obstacle is (a river, a lake). Terrain
+elsewhere isn't guaranteed crossable in a straight line, same as any
+top-down game with water or buildings in it; the path is the reliable route,
+not the only one.
 
 ## Components
 
@@ -150,24 +192,27 @@ transparently redirected to whichever process hosts their instance.
 ## Capacity, measured
 
 `server/scripts/load-test.mjs` fills a single zone instance with synthetic
-walking clients. At the 150-player cap, on one local dev process:
+walking clients. At the 150-player cap in Genesis (90×68 tiles), on one
+local dev process sharing this machine with other work:
 
 ```
-all 150 joined in 956ms (6.4ms/client)
+all 150 joined in 654ms (4.4ms/client)
 still connected: 150/150
-patches/sec — min 19.9 · median 19.9 · max 20.0
+patches/sec — min 17.8 · median 18.0 · max 18.1
 players in zone: 150
-players VISIBLE per client — min 2 · avg 27.7 · max 46
+players VISIBLE per client — min 6 · avg 31.5 · max 54
 ```
 
-Every client held the full 20Hz tick rate with no drops while carrying an
-average of 27.7 players instead of all 150 — interest management cuts what
-each client is sent by roughly 80%, and that ratio improves as the zone
-fills, because the view radius doesn't grow with the population.
-
-So the 100–150 figure is a conservative starting point, not a ceiling we're
-pressed against. Re-run this after any change to the simulation, since it's
-the number the whole sharding plan is built on.
+All 150 stayed connected with no drops, but the tick rate settled around
+18Hz rather than the full 20 — a real, if modest, cost of Genesis being a
+smaller zone (6,120 tiles) than the one this was first measured against
+(7,500), so the same population packs denser: 31.5 average visible per
+client instead of 27.7, more encode work per tick. Interest management is
+still doing its job — every client carries a fifth of the zone, not all of
+it — the number just moves with zone size and shape, not only player count.
+Re-measure after any change to zone sizes or the simulation, since it's the
+number the whole sharding plan is built on, and don't read a single
+manual run's Hz to the decimal on a shared machine.
 
 ## Build order
 
@@ -181,6 +226,9 @@ the number the whole sharding plan is built on.
 5. ~~Multi-instance sharding + matchmaker + Redis registry, and travel
    between zones.~~
 6. Wire to the portal (see `docs/INTEGRATION.md`).
+
+7. ~~A biblical-themed six-zone map, one per chapter of The Covenant's story
+   mode, each with its own generated terrain, palette and decoration set.~~
 
 Still open, roughly in order of how soon they'll bite: keeping a party in the
 same instance, the real TCG ruleset, persistence, and a load balancer in front

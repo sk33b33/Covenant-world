@@ -24,7 +24,7 @@ app.get("/config.json", (_req, res) => {
     viewRadiusTiles: VIEW_RADIUS_TILES,
     stepDurationMs: STEP_DURATION_MS,
     startingZone: STARTING_ZONE,
-    zones: Object.values(ZONES).map(({ id, name }) => ({ id, name })),
+    zones: Object.values(ZONES).map(({ id, name, subtitle, theme }) => ({ id, name, subtitle, theme })),
     terrain: TERRAIN,
   });
 });

@@ -45,6 +45,9 @@ export const ZoneState = schema(
     population: t.number().default(0),
     zoneId: t.string().default(""),
     zoneName: t.string().default(""),
+    zoneSubtitle: t.string().default(""),
+    /** Drives the client's palette and decoration choices for this zone. */
+    zoneTheme: t.string().default(""),
     /** Zone size in tiles. Travels with the state since instances differ. */
     width: t.uint16().default(0),
     height: t.uint16().default(0),
@@ -108,6 +111,8 @@ export class ZoneRoom extends Room<{ state: ZoneState }> {
     this.setState(new ZoneState());
     this.state.zoneId = this.zone.id;
     this.state.zoneName = this.zone.name;
+    this.state.zoneSubtitle = this.zone.subtitle;
+    this.state.zoneTheme = this.zone.theme;
     this.state.width = this.zone.tiles.width;
     this.state.height = this.zone.tiles.height;
 

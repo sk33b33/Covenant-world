@@ -34,7 +34,26 @@ npm run dev --workspace @covenant-world/server
 
 Open http://localhost:2567 in two tabs and walk around with WASD. Stand next
 to the other player and press <kbd>E</kbd> to challenge them into a battle,
-or walk off the east edge to cross into the next zone.
+or walk east to cross into the next zone. Add `?zone=kings` to a URL to start
+somewhere other than the beginning.
+
+## World
+
+Six zones, one per chapter of [The Covenant](https://github.com/sk33b33/The-Covenant)'s
+card game story mode, Genesis through Revelation, connected in that order —
+so walking the map retraces the story. Each chapter already has an energy
+type in the card game (light, fire, earth, spirit, water, shadow); that theme
+drives the zone's generated terrain and the client's palette:
+
+**Genesis** — Eden, a garden fed by a river · **Exodus** — the wilderness,
+sand and one oasis · **Kings** — the royal city, streets and stone ·
+**Prophets** — the highlands, dry and windswept · **Gospel** — Galilee, a
+great lake · **Revelation** — the new creation, scorched and unquiet.
+
+The card game only has Genesis and Exodus written yet; the overworld doesn't
+need encounter data to exist as a place, so all six zones are built. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how terrain generation
+works per zone.
 
 ## Status
 
